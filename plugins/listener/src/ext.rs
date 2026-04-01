@@ -23,7 +23,7 @@ pub trait ListenerPluginExt<R: tauri::Runtime> {
     ) -> impl Future<Output = Result<Option<String>, crate::Error>>;
     fn set_microphone_device(
         &self,
-        device_name: impl Into<String>,
+        device_name: String,
     ) -> impl Future<Output = Result<(), crate::Error>>;
 
     fn check_microphone_access(&self) -> impl Future<Output = Result<bool, crate::Error>>;
@@ -40,7 +40,7 @@ pub trait ListenerPluginExt<R: tauri::Runtime> {
 
     fn get_state(&self) -> impl Future<Output = crate::fsm::State>;
     fn stop_session(&self) -> impl Future<Output = ()>;
-    fn start_session(&self, id: impl Into<String>) -> impl Future<Output = ()>;
+    fn start_session(&self, id: String) -> impl Future<Output = ()>;
 }
 
 impl<R: tauri::Runtime, T: tauri::Manager<R>> ListenerPluginExt<R> for T {
@@ -64,13 +64,10 @@ impl<R: tauri::Runtime, T: tauri::Manager<R>> ListenerPluginExt<R> for T {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn set_microphone_device(
-        &self,
-        device_name: impl Into<String>,
-    ) -> Result<(), crate::Error> {
+    async fn set_microphone_device(&self, device_name: String) -> Result<(), crate::Error> {
         if let Some(cell) = registry::where_is(SessionActor::name()) {
             let actor: ActorRef<SessionMsg> = cell.into();
-            let _ = actor.cast(SessionMsg::ChangeMicDevice(Some(device_name.into())));
+            let _ = actor.cast(SessionMsg::ChangeMicDevice(Some(device_name)));
         }
 
         Ok(())
@@ -240,7 +237,7 @@ impl<R: tauri::Runtime, T: tauri::Manager<R>> ListenerPluginExt<R> for T {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn start_session(&self, session_id: impl Into<String>) {
+    async fn start_session(&self, session_id: String) {
         let state = self.state::<crate::SharedState>();
         let guard = state.lock().await;
 
@@ -249,7 +246,7 @@ impl<R: tauri::Runtime, T: tauri::Manager<R>> ListenerPluginExt<R> for T {
             SessionActor,
             SessionArgs {
                 app: guard.app.clone(),
-                session_id: session_id.into(),
+                session_id,
             },
         )
         .await;

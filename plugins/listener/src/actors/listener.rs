@@ -290,13 +290,13 @@ async fn spawn_rx_task(
 
 async fn update_session<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
-    session_id: impl Into<String>,
+    session_id: &str,
     words: Vec<Word2>,
 ) -> Result<Vec<Word2>, crate::Error> {
     use tauri_plugin_db::DatabasePluginExt;
 
     let mut session = app
-        .db_get_session(session_id)
+        .db_get_session(session_id.to_string())
         .await?
         .ok_or(crate::Error::NoneSession)?;
 
