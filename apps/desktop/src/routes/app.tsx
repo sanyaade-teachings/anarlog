@@ -24,10 +24,15 @@ import {
   useRightPanel,
 } from "@/contexts";
 import { commands } from "@/types";
+import { openURL } from "@/utils/shell";
 import { commands as analyticsCommands } from "@hypr/plugin-analytics";
 import { events as windowsEvents, getCurrentWebviewWindowLabel } from "@hypr/plugin-windows";
+import { Button } from "@hypr/ui/components/ui/button";
+import { Modal, ModalBody, ModalDescription, ModalFooter, ModalTitle } from "@hypr/ui/components/ui/modal";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@hypr/ui/components/ui/resizable";
 import { OngoingSessionProvider, SessionsProvider } from "@hypr/utils/contexts";
+
+const MIGRATION_NOTICE_SHOWN_KEY = "hypr-migration-notice-shown-v0.0.83";
 
 export const Route = createFileRoute("/app")({
   component: Component,
@@ -108,14 +113,35 @@ function Component() {
   const { sessionsStore, ongoingSessionStore, isOnboardingNeeded, isIndividualizationNeeded } = Route.useLoaderData();
 
   const [onboardingCompletedThisSession, setOnboardingCompletedThisSession] = useState(false);
+  const [showMigrationNotice, setShowMigrationNotice] = useState(false);
 
   const windowLabel = getCurrentWebviewWindowLabel();
   const isMain = windowLabel === "main";
-  const showNotifications = isMain && !isOnboardingNeeded;
+  const shouldShowMigrationNotice = isMain && showMigrationNotice;
+  const showNotifications = isMain && !isOnboardingNeeded && !shouldShowMigrationNotice;
 
   const shouldShowWelcomeModal = isMain && isOnboardingNeeded;
   const shouldShowIndividualization = isMain && isIndividualizationNeeded && !isOnboardingNeeded
     && !onboardingCompletedThisSession;
+
+  useEffect(() => {
+    if (!isMain) {
+      return;
+    }
+
+    if (import.meta.env.DEV) {
+      setShowMigrationNotice(true);
+      return;
+    }
+
+    const hasShownMigrationNotice = localStorage.getItem(MIGRATION_NOTICE_SHOWN_KEY) === "true";
+    if (hasShownMigrationNotice) {
+      return;
+    }
+
+    localStorage.setItem(MIGRATION_NOTICE_SHOWN_KEY, "true");
+    setShowMigrationNotice(true);
+  }, [isMain]);
 
   // Check if we're in the finder route
   const isFinderRoute = location.pathname.includes("/finder");
@@ -152,8 +178,12 @@ function Component() {
                           </div>
                         </div>
                         <ResponsivePanelsManager />
+                        <MigrationNoticeModal
+                          isOpen={shouldShowMigrationNotice}
+                          onClose={() => setShowMigrationNotice(false)}
+                        />
                         <WelcomeModal
-                          isOpen={shouldShowWelcomeModal}
+                          isOpen={shouldShowWelcomeModal && !shouldShowMigrationNotice}
                           onClose={() => {
                             setOnboardingCompletedThisSession(true);
                             analyticsCommands.event({
@@ -167,7 +197,7 @@ function Component() {
                           }}
                         />
                         <IndividualizationModal
-                          isOpen={shouldShowIndividualization}
+                          isOpen={shouldShowIndividualization && !shouldShowMigrationNotice}
                           onClose={() => {
                             commands.setIndividualizationNeeded(false);
                             router.invalidate();
@@ -198,6 +228,128 @@ function Component() {
         </LicenseRefreshProvider>
       )}
     </>
+  );
+}
+
+function MigrationNoticeModal({
+  isOpen,
+  onClose,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+}) {
+  const handleOpen = async (url: string) => {
+    try {
+      await openURL(url);
+    } catch (error) {
+      console.error("Failed to open external link:", error);
+    }
+  };
+
+  return (
+    <Modal
+      open={isOpen}
+      onClose={onClose}
+      size="lg"
+      className="max-h-[calc(100vh-48px)] w-[760px] max-w-[94vw] overflow-hidden border border-neutral-200 bg-background shadow-2xl"
+    >
+      <ModalBody className="max-h-[calc(100vh-160px)] space-y-5 overflow-y-auto px-8 py-7">
+        <div className="space-y-5 rounded-[28px] border border-neutral-200 bg-neutral-50/70 px-10 py-8">
+          <div className="space-y-2">
+            <div className="text-xs font-medium uppercase tracking-[0.18em] text-neutral-500">
+              A Note From The Char Team
+            </div>
+            <ModalTitle className="font-serif text-[2.15rem] font-medium leading-tight text-foreground">
+              Please move to the new Char app.
+            </ModalTitle>
+          </div>
+
+          <div className="space-y-4 text-[16px] leading-8 text-neutral-700">
+            <p>
+              If you are still using this Hyprnote build, thank you. Your notes and the rest of the app should continue
+              to work, but new updates are going into Char now.
+            </p>
+            <p className="text-neutral-900">
+              One important exception:{" "}
+              <span className="font-semibold">the `PRO` model will stop working in this old app.</span>{" "}
+              If you rely on PRO, please move to Char.
+            </p>
+            <p>
+              If you already have PRO, sign in to Char with the same email and your PRO status will carry over. Char
+              also includes an explicit data migration flow in Settings.
+            </p>
+            <p>
+              You can download Char from{" "}
+              <ExternalTextLink href="https://char.com/download/" onOpen={handleOpen}>
+                char.com/download
+              </ExternalTextLink>{" "}
+              or get it from{" "}
+              <ExternalTextLink href="https://github.com/fastrepl/char/releases" onOpen={handleOpen}>
+                GitHub Releases
+              </ExternalTextLink>.
+            </p>
+            <p>
+              If anything does not work, talk to us in{" "}
+              <ExternalTextLink href="https://hyprnote.com/discord" onOpen={handleOpen}>
+                Discord
+              </ExternalTextLink>{" "}
+              or use the chat bubble at{" "}
+              <ExternalTextLink href="https://char.com" onOpen={handleOpen}>
+                char.com
+              </ExternalTextLink>.
+            </p>
+          </div>
+
+          <div className="pt-2 text-sm text-neutral-500">
+            Thanks,
+            <div className="mt-1 font-serif text-xl italic text-neutral-900">The Char team</div>
+          </div>
+        </div>
+      </ModalBody>
+
+      <ModalFooter className="border-t border-neutral-200 bg-neutral-50 px-8 py-4">
+        <Button variant="outline" onClick={onClose}>
+          Dismiss
+        </Button>
+        <Button
+          variant="outline"
+          onClick={() => handleOpen("https://github.com/fastrepl/char/releases")}
+        >
+          View Releases
+        </Button>
+        <Button
+          onClick={() => handleOpen("https://char.com/download/")}
+          className="bg-black text-white hover:bg-neutral-800"
+        >
+          Download Char
+        </Button>
+      </ModalFooter>
+    </Modal>
+  );
+}
+
+function ExternalTextLink({
+  children,
+  href,
+  onOpen,
+}: {
+  children: React.ReactNode;
+  href: string;
+  onOpen: (url: string) => Promise<void>;
+}) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="font-medium text-neutral-900 underline decoration-neutral-300 underline-offset-4 transition-colors hover:text-black"
+      onClick={(e) => {
+        e.preventDefault();
+        void onOpen(href);
+      }}
+    >
+      {children}
+    </a>
   );
 }
 
