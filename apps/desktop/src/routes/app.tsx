@@ -28,7 +28,7 @@ import { openURL } from "@/utils/shell";
 import { commands as analyticsCommands } from "@hypr/plugin-analytics";
 import { events as windowsEvents, getCurrentWebviewWindowLabel } from "@hypr/plugin-windows";
 import { Button } from "@hypr/ui/components/ui/button";
-import { Modal, ModalBody, ModalDescription, ModalFooter, ModalTitle } from "@hypr/ui/components/ui/modal";
+import { Modal, ModalBody, ModalFooter, ModalTitle } from "@hypr/ui/components/ui/modal";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@hypr/ui/components/ui/resizable";
 import { OngoingSessionProvider, SessionsProvider } from "@hypr/utils/contexts";
 
