@@ -105,6 +105,9 @@ describe("settingsPersister roundtrip", () => {
         save_recordings: false,
         telemetry_consent: false,
       },
+      consent: {
+        auto_send_chat: true,
+      },
       language: {
         ai_language: "en",
         spoken_languages: ["en", "ko"],
@@ -190,6 +193,7 @@ describe("settingsPersister roundtrip", () => {
       autostart: true,
       audio_retention: "none",
       telemetry_consent: false,
+      consent_auto_send_chat: true,
       ai_language: "en",
       spoken_languages: '["en","ko"]',
       personalization_dictionary_terms: '["Anarlog","Parakeet TDT"]',

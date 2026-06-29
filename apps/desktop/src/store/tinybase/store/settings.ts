@@ -132,6 +132,11 @@ export const SETTINGS_MAPPING = {
       path: ["general", "telemetry_consent"],
       default: true as boolean,
     },
+    consent_auto_send_chat: {
+      type: "boolean",
+      path: ["consent", "auto_send_chat"],
+      default: false as boolean,
+    },
     // Actual values populated via persister load; defaults here are for type inference.
     ai_language: {
       type: "string",

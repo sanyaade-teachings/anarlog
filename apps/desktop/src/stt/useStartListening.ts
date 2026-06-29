@@ -1,6 +1,7 @@
 import { useCallback, useRef } from "react";
 
 import { commands as analyticsCommands } from "@hypr/plugin-analytics";
+import { commands as detectCommands } from "@hypr/plugin-detect";
 import type { TranscriptStorage } from "@hypr/store";
 
 import { useListener } from "./contexts";
@@ -47,6 +48,26 @@ function hasTranscriptContent(
   );
 }
 
+const CONSENT_CHAT_MESSAGE =
+  "Anarlog is recording and transcribing this meeting. Please reply here if you do not consent.";
+
+export async function sendConsentRequestToMeetingChat() {
+  const result =
+    await detectCommands.sendMeetingChatMessage(CONSENT_CHAT_MESSAGE);
+
+  if (result.status === "error") {
+    console.warn("[listener] failed to send consent message", result.error);
+    return;
+  }
+
+  if (!result.data.sent) {
+    console.warn(
+      "[listener] consent message was not sent",
+      result.data.warnings,
+    );
+  }
+}
+
 export function getPostCaptureAction(
   details: {
     audioPath: string | null;
@@ -73,6 +94,7 @@ export function useStartListening(sessionId: string) {
 
   const aiLanguage = useConfigValue("ai_language");
   const spokenLanguages = useConfigValue("spoken_languages");
+  const consentAutoSendChat = useConfigValue("consent_auto_send_chat");
 
   const start = useListener((state) => state.start);
   const { conn } = useSTTConnection();
@@ -246,6 +268,10 @@ export function useStartListening(sessionId: string) {
 
     setLeftSidebarExpanded(false);
 
+    if (consentAutoSendChat) {
+      void sendConsentRequestToMeetingChat();
+    }
+
     void analyticsCommands.event({
       event: "session_started",
       has_calendar_event: !!getSessionEventById(store, sessionId),
@@ -268,6 +294,7 @@ export function useStartListening(sessionId: string) {
     spokenLanguages,
     setLeftSidebarExpanded,
     settingsStore,
+    consentAutoSendChat,
   ]);
 
   return startListening;

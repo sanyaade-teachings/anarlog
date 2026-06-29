@@ -16,6 +16,7 @@ type ToastRegistryParams = {
   isAuthLoading: boolean;
   hasLLMConfigured: boolean;
   hasSttConfigured: boolean;
+  consentAutoSendChatEnabled: boolean;
   hasProSttConfigured: boolean;
   hasProLlmConfigured: boolean;
   isAiTranscriptionTabActive: boolean;
@@ -29,6 +30,8 @@ type ToastRegistryParams = {
   onSignIn: () => void | Promise<void>;
   onOpenLLMSettings: () => void;
   onOpenSTTSettings: () => void;
+  onEnableConsentAutoSendChat: () => void | Promise<void>;
+  onDismissConsentAutoSendChat: () => void | Promise<void>;
 };
 
 type DevtoolsToastPreviewParams = {
@@ -38,11 +41,14 @@ type DevtoolsToastPreviewParams = {
   onOpenSTTSettings: () => void;
 };
 
+export const CONSENT_AUTO_SEND_CHAT_TOAST_ID = "consent-auto-send-chat";
+
 export function createToastRegistry({
   isAuthenticated,
   isAuthLoading,
   hasLLMConfigured,
   hasSttConfigured,
+  consentAutoSendChatEnabled,
   hasProSttConfigured,
   hasProLlmConfigured,
   isAiTranscriptionTabActive,
@@ -56,6 +62,8 @@ export function createToastRegistry({
   onSignIn,
   onOpenLLMSettings,
   onOpenSTTSettings,
+  onEnableConsentAutoSendChat,
+  onDismissConsentAutoSendChat,
 }: ToastRegistryParams): ToastRegistryEntry[] {
   const downloadTitle =
     activeDownloads.length === 1 && downloadingModel
@@ -125,6 +133,28 @@ export function createToastRegistry({
       },
       condition: () =>
         hasSttConfigured && !hasLLMConfigured && !isAiIntelligenceTabActive,
+    },
+    {
+      toast: {
+        id: CONSENT_AUTO_SEND_CHAT_TOAST_ID,
+        title: "Send consent in chat?",
+        description:
+          "Anarlog can automatically post the consent request in meeting chat when consent asking is configured.",
+        primaryAction: {
+          label: "Yes",
+          onClick: onEnableConsentAutoSendChat,
+        },
+        secondaryAction: {
+          label: "Dismiss",
+          onClick: onDismissConsentAutoSendChat,
+        },
+        dismissible: true,
+      },
+      condition: () =>
+        hasSttConfigured &&
+        hasLLMConfigured &&
+        !consentAutoSendChatEnabled &&
+        !isAiTranscriptionTabActive,
     },
     {
       toast: {
