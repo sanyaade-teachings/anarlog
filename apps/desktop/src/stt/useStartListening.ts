@@ -1,7 +1,10 @@
 import { useCallback, useRef } from "react";
 
+import { parseJsonContent } from "@hypr/editor/markdown";
+import type { JSONContent } from "@hypr/editor/note";
 import { commands as analyticsCommands } from "@hypr/plugin-analytics";
 import { commands as detectCommands } from "@hypr/plugin-detect";
+import type { MeetingCapturedChatMessage } from "@hypr/plugin-detect";
 import type { TranscriptStorage } from "@hypr/store";
 
 import { useListener } from "./contexts";
@@ -50,6 +53,7 @@ function hasTranscriptContent(
 
 const CONSENT_CHAT_MESSAGE =
   "Anarlog is recording and transcribing this meeting. Please reply here if you do not consent.";
+const MEETING_CHAT_CAPTURE_INTERVAL_MS = 5_000;
 
 export async function sendConsentRequestToMeetingChat() {
   const result =
@@ -86,6 +90,152 @@ export function getPostCaptureAction(
   return "none" as const;
 }
 
+export function appendCapturedMeetingChatMessagesToRawMd(
+  rawMd: string | undefined,
+  messages: MeetingCapturedChatMessage[],
+  seenSignatures: Set<string>,
+) {
+  const doc = parseJsonContent(rawMd);
+  const existingText = extractNoteText(doc);
+  const content = [...(doc.content ?? [])];
+  let appended = 0;
+
+  for (const message of messages) {
+    const signature = getCapturedMeetingChatSignature(message);
+    const line = formatCapturedMeetingChatLine(message);
+
+    if (seenSignatures.has(signature) || existingText.includes(line)) {
+      seenSignatures.add(signature);
+      continue;
+    }
+
+    content.push({
+      type: "paragraph",
+      content: [{ type: "text", text: line }],
+    });
+    seenSignatures.add(signature);
+    appended += 1;
+  }
+
+  if (appended === 0) {
+    return { rawMd: rawMd ?? "", appended };
+  }
+
+  return {
+    rawMd: JSON.stringify({
+      ...doc,
+      content: trimLeadingEmptyParagraph(content),
+    }),
+    appended,
+  };
+}
+
+function startMeetingChatCapture(
+  store: main.Store,
+  sessionId: string,
+): () => void {
+  const seenSignatures = new Set<string>();
+  let stopped = false;
+  let inFlight = false;
+
+  const capture = async () => {
+    if (stopped || inFlight) {
+      return;
+    }
+
+    inFlight = true;
+    try {
+      const result = await detectCommands.captureMeetingChatMessages();
+      if (result.status === "error") {
+        console.warn("[listener] failed to capture meeting chat", result.error);
+        return;
+      }
+
+      if (result.data.messages.length === 0) {
+        return;
+      }
+
+      const rawMd = store.getCell("sessions", sessionId, "raw_md");
+      const next = appendCapturedMeetingChatMessagesToRawMd(
+        typeof rawMd === "string" ? rawMd : undefined,
+        result.data.messages,
+        seenSignatures,
+      );
+
+      if (next.appended > 0) {
+        store.setCell("sessions", sessionId, "raw_md", next.rawMd);
+      }
+    } catch (error) {
+      console.warn("[listener] failed to capture meeting chat", error);
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  void capture();
+  const interval = setInterval(() => {
+    void capture();
+  }, MEETING_CHAT_CAPTURE_INTERVAL_MS);
+
+  return () => {
+    stopped = true;
+    clearInterval(interval);
+  };
+}
+
+function formatCapturedMeetingChatLine(message: MeetingCapturedChatMessage) {
+  const platform = formatMeetingPlatform(message.platform);
+  const metadata = [message.timestamp, message.sender]
+    .filter((value): value is string => typeof value === "string" && !!value)
+    .join(" ");
+
+  return metadata
+    ? `[${platform} chat] ${metadata}: ${message.text}`
+    : `[${platform} chat] ${message.text}`;
+}
+
+function formatMeetingPlatform(
+  platform: MeetingCapturedChatMessage["platform"],
+) {
+  switch (platform) {
+    case "zoom":
+      return "Zoom";
+    case "slack":
+      return "Slack";
+    default:
+      return "Meeting";
+  }
+}
+
+function getCapturedMeetingChatSignature(message: MeetingCapturedChatMessage) {
+  return [
+    message.platform,
+    message.sender ?? "",
+    message.timestamp ?? "",
+    message.text,
+  ].join("\n");
+}
+
+function extractNoteText(node: JSONContent): string {
+  return [
+    node.text ?? "",
+    ...(node.content?.map((child) => extractNoteText(child)) ?? []),
+  ].join("\n");
+}
+
+function trimLeadingEmptyParagraph(content: JSONContent[]) {
+  if (content.length <= 1) {
+    return content;
+  }
+
+  const [first, ...rest] = content;
+  if (first?.type === "paragraph" && !extractNoteText(first).trim()) {
+    return rest;
+  }
+
+  return content;
+}
+
 export function useStartListening(sessionId: string) {
   const { user_id } = main.UI.useValues(main.STORE_ID);
   const store = main.UI.useStore(main.STORE_ID);
@@ -105,6 +255,7 @@ export function useStartListening(sessionId: string) {
   const keywords = useKeywords(sessionId);
   const runBatchRef = useRef(runBatch);
   const canRunBatchRef = useRef(canRunBatchTranscription(conn));
+  const stopMeetingChatCaptureRef = useRef<(() => void) | null>(null);
   runBatchRef.current = runBatch;
   canRunBatchRef.current = canRunBatchTranscription(conn);
 
@@ -127,6 +278,8 @@ export function useStartListening(sessionId: string) {
     } = { current: null };
 
     const onStopped: OnStoppedCallback = async (_sessionId, details) => {
+      stopMeetingChatCaptureRef.current?.();
+      stopMeetingChatCaptureRef.current = null;
       transcriptAccumulatorRef.current?.dispose();
       transcriptAccumulatorRef.current = null;
 
@@ -257,6 +410,8 @@ export function useStartListening(sessionId: string) {
     );
 
     if (!started) {
+      stopMeetingChatCaptureRef.current?.();
+      stopMeetingChatCaptureRef.current = null;
       transcriptAccumulatorRef.current?.dispose();
       transcriptAccumulatorRef.current = null;
 
@@ -267,6 +422,11 @@ export function useStartListening(sessionId: string) {
     }
 
     setLeftSidebarExpanded(false);
+    stopMeetingChatCaptureRef.current?.();
+    stopMeetingChatCaptureRef.current = startMeetingChatCapture(
+      store as main.Store,
+      sessionId,
+    );
 
     if (consentAutoSendChat) {
       void sendConsentRequestToMeetingChat();

@@ -70,6 +70,14 @@ async sendMeetingChatMessage(message: string) : Promise<Result<MeetingChatSendRe
     else return { status: "error", error: e  as any };
 }
 },
+async captureMeetingChatMessages() : Promise<Result<MeetingChatCaptureResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("plugin:detect|capture_meeting_chat_messages") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getPreferredLanguages() : Promise<Result<string[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("plugin:detect|get_preferred_languages") };
@@ -116,6 +124,8 @@ export type DetectEvent = { type: "micDetected"; key: string; apps: InstalledApp
 export type InstalledApp = { id: string; name: string }
 export type MeetingAccessibilityInspection = { app: MeetingApp; pid: number; platform: MeetingPlatform; surface: MeetingSurface; accessibilityTrusted: boolean; windowTitle: string | null; participantStreams: MeetingParticipantStream[]; latestActiveSpeakers: string[]; chatTargets: MeetingChatTarget[]; warnings: string[] }
 export type MeetingApp = { id: string; name: string }
+export type MeetingCapturedChatMessage = { id: string; platform: MeetingPlatform; surface: MeetingSurface; sender: string | null; timestamp: string | null; text: string; links: string[] }
+export type MeetingChatCaptureResult = { app: MeetingApp | null; platform: MeetingPlatform; surface: MeetingSurface; messages: MeetingCapturedChatMessage[]; warnings: string[] }
 export type MeetingChatSendResult = { sent: boolean; app: MeetingApp | null; platform: MeetingPlatform; surface: MeetingSurface; inputLabel: string | null; sendAction: string | null; warnings: string[] }
 export type MeetingChatTarget = { id: string; kind: string; label: string | null; bounds: AxRect | null; enabled: boolean | null; settable: boolean; confidence: number; signals: string[] }
 export type MeetingParticipantStream = { id: string; platform: MeetingPlatform; surface: MeetingSurface; participantName: string | null; label: string | null; bounds: AxRect | null; confidence: number; isActiveSpeaker: boolean; signals: string[] }

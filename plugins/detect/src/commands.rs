@@ -42,6 +42,14 @@ pub(crate) async fn send_meeting_chat_message<R: tauri::Runtime>(
     Ok(hypr_detect::send_meeting_chat_message(message))
 }
 
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn capture_meeting_chat_messages<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+) -> Result<hypr_detect::MeetingChatCaptureResult, String> {
+    Ok(hypr_detect::capture_meeting_chat_messages())
+}
+
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
 #[specta::specta]

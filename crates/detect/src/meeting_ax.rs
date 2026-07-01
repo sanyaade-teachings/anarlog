@@ -122,6 +122,28 @@ pub struct MeetingChatSendResult {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingCapturedChatMessage {
+    pub id: String,
+    pub platform: MeetingPlatform,
+    pub surface: MeetingSurface,
+    pub sender: Option<String>,
+    pub timestamp: Option<String>,
+    pub text: String,
+    pub links: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingChatCaptureResult {
+    pub app: Option<MeetingApp>,
+    pub platform: MeetingPlatform,
+    pub surface: MeetingSurface,
+    pub messages: Vec<MeetingCapturedChatMessage>,
+    pub warnings: Vec<String>,
+}
+
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone)]
 struct AxNode {
@@ -310,6 +332,91 @@ pub fn send_meeting_chat_message(_message: String) -> MeetingChatSendResult {
         input_label: None,
         send_action: None,
         warnings: vec!["meeting chat AX send is only available on macOS".to_string()],
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn capture_meeting_chat_messages() -> MeetingChatCaptureResult {
+    let accessibility_trusted = macos_accessibility_client::accessibility::application_is_trusted();
+    if !accessibility_trusted {
+        return MeetingChatCaptureResult {
+            app: None,
+            platform: MeetingPlatform::Unknown,
+            surface: MeetingSurface::Unknown,
+            messages: Vec::new(),
+            warnings: vec!["macOS accessibility permission is not trusted".to_string()],
+        };
+    }
+
+    for (app, pid) in running_meeting_apps() {
+        let mut warnings = Vec::new();
+        let ax_app = ax::UiElement::with_app_pid(pid);
+        let _ = ax_app.set_messaging_timeout_secs(0.6);
+
+        let mut nodes = Vec::new();
+        collect_nodes(&ax_app, 0, &mut nodes, &mut warnings);
+        let window_title = nodes.iter().find_map(|node| {
+            (node.role.as_deref() == Some("AXWindow"))
+                .then(|| node.title.clone())
+                .flatten()
+        });
+        let platform = classify_platform(
+            &app.id,
+            window_title.as_deref(),
+            &nodes,
+            classify_bundle(&app.id),
+        );
+
+        if !matches!(platform, MeetingPlatform::Zoom | MeetingPlatform::Slack) {
+            continue;
+        }
+
+        let surface = classify_surface(&app.id, &platform);
+
+        if find_chat_targets(&nodes)
+            .iter()
+            .all(|target| target.kind != "messageList")
+        {
+            let chat_elements = collect_sorted_chat_elements(&ax_app);
+            if let Some(control_index) = find_chat_open_control_index(&chat_elements) {
+                let control = &chat_elements[control_index];
+                if control.element.perform_action(ax::action::press()).is_ok() {
+                    warnings.push("opened chat control via AX".to_string());
+                    nodes.clear();
+                    collect_nodes(&ax_app, 0, &mut nodes, &mut warnings);
+                }
+            }
+        }
+
+        let messages = extract_chat_messages(&platform, &surface, &nodes);
+        if !messages.is_empty() {
+            return MeetingChatCaptureResult {
+                app: Some(app),
+                platform,
+                surface,
+                messages,
+                warnings,
+            };
+        }
+    }
+
+    MeetingChatCaptureResult {
+        app: None,
+        platform: MeetingPlatform::Unknown,
+        surface: MeetingSurface::Unknown,
+        messages: Vec::new(),
+        warnings: vec!["no visible supported meeting chat messages found".to_string()],
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn capture_meeting_chat_messages() -> MeetingChatCaptureResult {
+    MeetingChatCaptureResult {
+        app: None,
+        platform: MeetingPlatform::Unknown,
+        surface: MeetingSurface::Unknown,
+        messages: Vec::new(),
+        warnings: vec!["meeting chat AX capture is only available on macOS".to_string()],
     }
 }
 
@@ -771,6 +878,273 @@ fn find_chat_targets(nodes: &[AxNode]) -> Vec<MeetingChatTarget> {
 }
 
 #[cfg(target_os = "macos")]
+fn extract_chat_messages(
+    platform: &MeetingPlatform,
+    surface: &MeetingSurface,
+    nodes: &[AxNode],
+) -> Vec<MeetingCapturedChatMessage> {
+    let mut seen = HashSet::new();
+    let mut messages = Vec::new();
+
+    for node in nodes {
+        let Some(raw_text) = chat_message_text(node) else {
+            continue;
+        };
+        let Some(parsed) = parse_chat_message(platform, &raw_text) else {
+            continue;
+        };
+        let signature = format!(
+            "{:?}|{}|{}|{}",
+            platform,
+            parsed.sender.as_deref().unwrap_or_default(),
+            parsed.timestamp.as_deref().unwrap_or_default(),
+            parsed.text
+        );
+        if !seen.insert(signature.clone()) {
+            continue;
+        }
+
+        messages.push(MeetingCapturedChatMessage {
+            id: format!("ax-chat-{signature}"),
+            platform: platform.clone(),
+            surface: surface.clone(),
+            sender: parsed.sender,
+            timestamp: parsed.timestamp,
+            links: extract_links(&parsed.text),
+            text: parsed.text,
+        });
+    }
+
+    messages.truncate(80);
+    messages
+}
+
+#[cfg(target_os = "macos")]
+struct ParsedChatMessage {
+    sender: Option<String>,
+    timestamp: Option<String>,
+    text: String,
+}
+
+#[cfg(target_os = "macos")]
+fn chat_message_text(node: &AxNode) -> Option<String> {
+    let role = node.role.as_deref().unwrap_or_default();
+    if node.settable_value || matches!(role, "AXTextField" | "AXTextArea") {
+        return None;
+    }
+    if candidate_chat_target(node).is_some_and(|target| {
+        matches!(
+            target.kind.as_str(),
+            "input" | "sendButton" | "openChatControl"
+        )
+    }) {
+        return None;
+    }
+
+    let value = node
+        .value
+        .as_deref()
+        .or(node.title.as_deref())
+        .or(node.description.as_deref())?;
+    let text = normalize_chat_text(value);
+    if text.len() < 2 || is_chat_chrome_text(&text) {
+        return None;
+    }
+
+    Some(text)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_chat_message(platform: &MeetingPlatform, raw_text: &str) -> Option<ParsedChatMessage> {
+    match platform {
+        MeetingPlatform::Zoom => parse_zoom_chat_message(raw_text).or_else(|| {
+            parse_generic_chat_message(raw_text, &["Everyone", "To Everyone", "Direct message"])
+        }),
+        MeetingPlatform::Slack => parse_slack_chat_message(raw_text)
+            .or_else(|| parse_generic_chat_message(raw_text, &["Huddle", "Thread"])),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn parse_zoom_chat_message(raw_text: &str) -> Option<ParsedChatMessage> {
+    let lines = chat_lines(raw_text);
+    let first = lines.first()?.as_str();
+    if !first.starts_with("From ") {
+        return None;
+    }
+
+    let mut sender = first.trim_start_matches("From ").trim();
+    if let Some((name, _target)) = sender.split_once(" to ") {
+        sender = name.trim();
+    }
+
+    let mut timestamp = None;
+    let mut message_start = 1;
+    if let Some(line) = lines.get(1) {
+        if looks_like_time(line) {
+            timestamp = Some(line.clone());
+            message_start = 2;
+        }
+    }
+
+    let text = lines[message_start..].join("\n").trim().to_string();
+    (!text.is_empty()).then(|| ParsedChatMessage {
+        sender: non_empty_string(sender),
+        timestamp,
+        text,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn parse_slack_chat_message(raw_text: &str) -> Option<ParsedChatMessage> {
+    let lines = chat_lines(raw_text);
+    if lines.len() < 2 {
+        return None;
+    }
+
+    let mut sender = lines[0].as_str();
+    let mut timestamp = None;
+    let mut message_start = 1;
+
+    if let Some((name, time)) = split_sender_time(sender) {
+        sender = name;
+        timestamp = Some(time.to_string());
+    } else if looks_like_time(&lines[1]) {
+        timestamp = Some(lines[1].clone());
+        message_start = 2;
+    }
+
+    let text = lines[message_start..].join("\n").trim().to_string();
+    (!text.is_empty() && !is_chat_chrome_text(&text)).then(|| ParsedChatMessage {
+        sender: non_empty_string(sender),
+        timestamp,
+        text,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn parse_generic_chat_message(
+    raw_text: &str,
+    ignored_prefixes: &[&str],
+) -> Option<ParsedChatMessage> {
+    let lines = chat_lines(raw_text);
+    if lines.is_empty()
+        || ignored_prefixes
+            .iter()
+            .any(|prefix| lines[0].starts_with(prefix))
+    {
+        return None;
+    }
+
+    let text = lines.join("\n");
+    if text.len() < 3 || is_chat_chrome_text(&text) {
+        return None;
+    }
+
+    Some(ParsedChatMessage {
+        sender: None,
+        timestamp: None,
+        text,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn chat_lines(text: &str) -> Vec<String> {
+    normalize_chat_text(text)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_chat_text(text: &str) -> String {
+    text.replace('\u{00a0}', " ")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(target_os = "macos")]
+fn is_chat_chrome_text(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    matches!(
+        lower.as_str(),
+        "chat"
+            | "meeting chat"
+            | "send"
+            | "send message"
+            | "send a message"
+            | "message everyone"
+            | "type a message"
+            | "conversation"
+            | "message list"
+            | "new messages"
+    ) || lower.starts_with("type a message")
+        || lower.starts_with("message everyone")
+        || lower.starts_with("send a message")
+}
+
+#[cfg(target_os = "macos")]
+fn split_sender_time(text: &str) -> Option<(&str, &str)> {
+    let trimmed = text.trim();
+    for suffix in [" AM", " PM", " am", " pm"] {
+        if let Some(without_period) = trimmed.strip_suffix(suffix) {
+            let (name, clock) = without_period.rsplit_once(' ')?;
+            let time_start = trimmed.len() - clock.len() - suffix.len();
+            let time = &trimmed[time_start..];
+            return looks_like_time(time).then_some((name.trim(), time.trim()));
+        }
+    }
+
+    let (name, time) = trimmed.rsplit_once(' ')?;
+    looks_like_time(time).then_some((name.trim(), time.trim()))
+}
+
+#[cfg(target_os = "macos")]
+fn looks_like_time(text: &str) -> bool {
+    let compact = text.trim().to_lowercase();
+    let time = compact
+        .strip_suffix(" am")
+        .or_else(|| compact.strip_suffix(" pm"))
+        .unwrap_or(&compact);
+    let Some((hour, minute)) = time.split_once(':') else {
+        return false;
+    };
+
+    !hour.is_empty()
+        && hour.len() <= 2
+        && minute.len() == 2
+        && hour.chars().all(|c| c.is_ascii_digit())
+        && minute.chars().all(|c| c.is_ascii_digit())
+}
+
+#[cfg(target_os = "macos")]
+fn non_empty_string(text: &str) -> Option<String> {
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn extract_links(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter_map(|part| {
+            let link = part.trim_matches(|c: char| {
+                matches!(
+                    c,
+                    '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | '.'
+                )
+            });
+            (link.starts_with("http://") || link.starts_with("https://")).then(|| link.to_string())
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
 fn candidate_chat_target(node: &AxNode) -> Option<MeetingChatTarget> {
     let role = node.role.as_deref().unwrap_or_default();
     let text = node.text.as_str();
@@ -972,6 +1346,52 @@ mod tests {
         assert_eq!(target.kind, "openChatControl");
         assert!(!target.settable);
         assert!(target.signals.contains(&"open-chat-control".to_string()));
+    }
+
+    #[test]
+    fn test_zoom_chat_message_parser_preserves_sender_time_text_and_links() {
+        let parsed = parse_chat_message(
+            &MeetingPlatform::Zoom,
+            "From Ada Lovelace to Everyone\n10:42 AM\nHere is the doc https://example.com/spec.",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.sender, Some("Ada Lovelace".to_string()));
+        assert_eq!(parsed.timestamp, Some("10:42 AM".to_string()));
+        assert_eq!(parsed.text, "Here is the doc https://example.com/spec.");
+        assert_eq!(
+            extract_links(&parsed.text),
+            vec!["https://example.com/spec"]
+        );
+    }
+
+    #[test]
+    fn test_slack_chat_message_parser_handles_sender_time_prefix() {
+        let parsed = parse_chat_message(
+            &MeetingPlatform::Slack,
+            "Grace Hopper 9:03 PM\nShip it after the final check",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.sender, Some("Grace Hopper".to_string()));
+        assert_eq!(parsed.timestamp, Some("9:03 PM".to_string()));
+        assert_eq!(parsed.text, "Ship it after the final check");
+    }
+
+    #[test]
+    fn test_extract_chat_messages_dedupes_visible_rows() {
+        let message = "From Ada Lovelace to Everyone\n10:42 AM\nDecision: keep the launch date";
+        let nodes = vec![
+            node(12, "AXStaticText", message, None),
+            node(13, "AXStaticText", message, None),
+        ];
+
+        let messages =
+            extract_chat_messages(&MeetingPlatform::Zoom, &MeetingSurface::Native, &nodes);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].sender, Some("Ada Lovelace".to_string()));
+        assert_eq!(messages[0].text, "Decision: keep the launch date");
     }
 
     #[test]

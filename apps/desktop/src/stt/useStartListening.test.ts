@@ -1,8 +1,11 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { getPostCaptureAction } from "./useStartListening";
-import { useStartListening } from "./useStartListening";
+import {
+  appendCapturedMeetingChatMessagesToRawMd,
+  getPostCaptureAction,
+  useStartListening,
+} from "./useStartListening";
 
 const {
   queueAutoEnhanceMock,
@@ -23,6 +26,7 @@ const {
   mainStoreMock,
   settingsStoreMock,
   sendMeetingChatMessageMock,
+  captureMeetingChatMessagesMock,
 } = vi.hoisted(() => ({
   queueAutoEnhanceMock: vi.fn(),
   queueAutoEnhanceIfSummaryEmptyMock: vi.fn(),
@@ -49,6 +53,7 @@ const {
   },
   settingsStoreMock: { id: "settings-store" },
   sendMeetingChatMessageMock: vi.fn(),
+  captureMeetingChatMessagesMock: vi.fn(),
 }));
 
 vi.mock("@hypr/plugin-transcription", () => ({
@@ -64,6 +69,17 @@ vi.mock("./contexts", () => ({
 vi.mock("@hypr/plugin-detect", () => ({
   commands: {
     sendMeetingChatMessage: sendMeetingChatMessageMock,
+    captureMeetingChatMessages: captureMeetingChatMessagesMock,
+  },
+}));
+
+vi.mock("@hypr/editor/markdown", () => ({
+  parseJsonContent: (value: string | undefined) => {
+    if (!value) {
+      return { type: "doc", content: [{ type: "paragraph" }] };
+    }
+
+    return JSON.parse(value);
   },
 }));
 
@@ -187,9 +203,91 @@ describe("getPostCaptureAction", () => {
   });
 });
 
+describe("appendCapturedMeetingChatMessagesToRawMd", () => {
+  test("appends captured messages as source-prefixed memo paragraphs", () => {
+    const rawMd = JSON.stringify({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [{ type: "text", text: "Existing memo" }],
+        },
+      ],
+    });
+
+    const result = appendCapturedMeetingChatMessagesToRawMd(
+      rawMd,
+      [
+        {
+          id: "msg-1",
+          platform: "zoom",
+          surface: "native",
+          sender: "Ada",
+          timestamp: "10:42 AM",
+          text: "Here is the doc https://example.com/spec",
+          links: ["https://example.com/spec"],
+        },
+      ],
+      new Set(),
+    );
+
+    const parsed = JSON.parse(result.rawMd);
+
+    expect(result.appended).toBe(1);
+    expect(parsed.content.at(-1)).toEqual({
+      type: "paragraph",
+      content: [
+        {
+          type: "text",
+          text: "[Zoom chat] 10:42 AM Ada: Here is the doc https://example.com/spec",
+        },
+      ],
+    });
+  });
+
+  test("skips messages already present in the memo", () => {
+    const line = "[Slack chat] 9:03 PM Grace: Ship it";
+    const rawMd = JSON.stringify({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [{ type: "text", text: line }],
+        },
+      ],
+    });
+
+    const result = appendCapturedMeetingChatMessagesToRawMd(
+      rawMd,
+      [
+        {
+          id: "msg-1",
+          platform: "slack",
+          surface: "native",
+          sender: "Grace",
+          timestamp: "9:03 PM",
+          text: "Ship it",
+          links: [],
+        },
+      ],
+      new Set(),
+    );
+
+    expect(result.appended).toBe(0);
+  });
+});
+
 describe("useStartListening", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(globalThis, "setInterval").mockReturnValue(
+      0 as unknown as ReturnType<typeof setInterval>,
+    );
+    vi.spyOn(globalThis, "clearInterval").mockImplementation(() => undefined);
 
     useListenerMock.mockImplementation((selector) =>
       selector({
@@ -227,6 +325,16 @@ describe("useStartListening", () => {
       status: "ok",
       data: {
         sent: true,
+        warnings: [],
+      },
+    });
+    captureMeetingChatMessagesMock.mockResolvedValue({
+      status: "ok",
+      data: {
+        app: null,
+        platform: "unknown",
+        surface: "unknown",
+        messages: [],
         warnings: [],
       },
     });
@@ -581,6 +689,52 @@ describe("useStartListening", () => {
     await waitFor(() => {
       expect(sendMeetingChatMessageMock).toHaveBeenCalledWith(
         "Anarlog is recording and transcribing this meeting. Please reply here if you do not consent.",
+      );
+    });
+  });
+
+  test("appends captured meeting chat messages to the active session memo", async () => {
+    mainStoreMock.getCell.mockImplementation(
+      (table: string, rowId: string, cell: string) =>
+        table === "sessions" && rowId === "session-1" && cell === "raw_md"
+          ? JSON.stringify({ type: "doc", content: [{ type: "paragraph" }] })
+          : "",
+    );
+    captureMeetingChatMessagesMock.mockResolvedValueOnce({
+      status: "ok",
+      data: {
+        app: { id: "us.zoom.xos", name: "Zoom" },
+        platform: "zoom",
+        surface: "native",
+        messages: [
+          {
+            id: "msg-1",
+            platform: "zoom",
+            surface: "native",
+            sender: "Ada",
+            timestamp: "10:42 AM",
+            text: "Decision: keep the launch date",
+            links: [],
+          },
+        ],
+        warnings: [],
+      },
+    });
+
+    const { result } = renderHook(() => useStartListening("session-1"));
+
+    await act(async () => {
+      await result.current();
+    });
+
+    await waitFor(() => {
+      expect(mainStoreMock.setCell).toHaveBeenCalledWith(
+        "sessions",
+        "session-1",
+        "raw_md",
+        expect.stringContaining(
+          "[Zoom chat] 10:42 AM Ada: Decision: keep the launch date",
+        ),
       );
     });
   });
