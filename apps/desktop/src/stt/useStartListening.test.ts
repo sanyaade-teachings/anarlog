@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import { getPostCaptureAction } from "./useStartListening";
@@ -22,6 +22,7 @@ const {
   deleteProcessedAudioForRetentionMock,
   mainStoreMock,
   settingsStoreMock,
+  sendMeetingChatMessageMock,
 } = vi.hoisted(() => ({
   queueAutoEnhanceMock: vi.fn(),
   queueAutoEnhanceIfSummaryEmptyMock: vi.fn(),
@@ -47,6 +48,7 @@ const {
     transaction: vi.fn((fn: () => void) => fn()),
   },
   settingsStoreMock: { id: "settings-store" },
+  sendMeetingChatMessageMock: vi.fn(),
 }));
 
 vi.mock("@hypr/plugin-transcription", () => ({
@@ -57,6 +59,12 @@ vi.mock("@hypr/plugin-transcription", () => ({
 
 vi.mock("./contexts", () => ({
   useListener: useListenerMock,
+}));
+
+vi.mock("@hypr/plugin-detect", () => ({
+  commands: {
+    sendMeetingChatMessage: sendMeetingChatMessageMock,
+  },
 }));
 
 vi.mock("./useKeywords", () => ({
@@ -191,7 +199,11 @@ describe("useStartListening", () => {
     useValuesMock.mockReturnValue({ user_id: "user-1" });
     useIndexesMock.mockReturnValue(null);
     useConfigValueMock.mockImplementation((key) =>
-      key === "ai_language" ? "en" : [],
+      key === "ai_language"
+        ? "en"
+        : key === "consent_auto_send_chat"
+          ? false
+          : [],
     );
     settingsUseStoreMock.mockReturnValue(settingsStoreMock);
     mainStoreMock.getCell.mockImplementation(() => "");
@@ -210,6 +222,13 @@ describe("useStartListening", () => {
     isSupportedLanguagesLiveMock.mockResolvedValue({
       status: "ok",
       data: true,
+    });
+    sendMeetingChatMessageMock.mockResolvedValue({
+      status: "ok",
+      data: {
+        sent: true,
+        warnings: [],
+      },
     });
   });
 
@@ -442,7 +461,11 @@ describe("useStartListening", () => {
 
   test("keeps supported non-English realtime local models live", async () => {
     useConfigValueMock.mockImplementation((key) =>
-      key === "ai_language" ? "de" : ["en"],
+      key === "ai_language"
+        ? "de"
+        : key === "consent_auto_send_chat"
+          ? false
+          : ["en"],
     );
     useSTTConnectionMock.mockReturnValue({
       conn: {
@@ -467,7 +490,11 @@ describe("useStartListening", () => {
 
   test("keeps realtime local transcription live by filtering unsupported extra spoken languages", async () => {
     useConfigValueMock.mockImplementation((key) =>
-      key === "ai_language" ? "en" : ["ko"],
+      key === "ai_language"
+        ? "en"
+        : key === "consent_auto_send_chat"
+          ? false
+          : ["ko"],
     );
     useSTTConnectionMock.mockReturnValue({
       conn: {
@@ -492,7 +519,11 @@ describe("useStartListening", () => {
 
   test("uses the main language for Deepgram live capture when extras are unsupported", async () => {
     useConfigValueMock.mockImplementation((key) =>
-      key === "ai_language" ? "en" : ["ko"],
+      key === "ai_language"
+        ? "en"
+        : key === "consent_auto_send_chat"
+          ? false
+          : ["ko"],
     );
     useSTTConnectionMock.mockReturnValue({
       conn: {
@@ -519,6 +550,38 @@ describe("useStartListening", () => {
     expect(startMock.mock.calls[0]?.[0]).toMatchObject({
       languages: ["en"],
       transcription_mode: undefined,
+    });
+  });
+
+  test("does not send the consent chat message when auto-send is disabled", async () => {
+    const { result } = renderHook(() => useStartListening("session-1"));
+
+    await act(async () => {
+      await result.current();
+    });
+
+    expect(sendMeetingChatMessageMock).not.toHaveBeenCalled();
+  });
+
+  test("sends the consent chat message after listening starts when auto-send is enabled", async () => {
+    useConfigValueMock.mockImplementation((key: string) =>
+      key === "ai_language"
+        ? "en"
+        : key === "consent_auto_send_chat"
+          ? true
+          : [],
+    );
+
+    const { result } = renderHook(() => useStartListening("session-1"));
+
+    await act(async () => {
+      await result.current();
+    });
+
+    await waitFor(() => {
+      expect(sendMeetingChatMessageMock).toHaveBeenCalledWith(
+        "Anarlog is recording and transcribing this meeting. Please reply here if you do not consent.",
+      );
     });
   });
 });

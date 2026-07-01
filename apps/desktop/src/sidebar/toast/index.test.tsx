@@ -34,6 +34,7 @@ vi.mock("~/shared/config", () => ({
     current_llm_model: "model",
     current_stt_provider: "local",
     current_stt_model: "model",
+    consent_auto_send_chat: true,
   }),
 }));
 

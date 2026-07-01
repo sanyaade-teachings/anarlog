@@ -184,6 +184,7 @@ export const valueSchemaForTinybase = {
   respect_dnd: { type: "boolean" },
   quit_intercept: { type: "boolean" },
   telemetry_consent: { type: "boolean" },
+  consent_auto_send_chat: { type: "boolean" },
   ai_language: { type: "string" },
   spoken_languages: { type: "string" },
   personalization_dictionary_terms: { type: "string" },

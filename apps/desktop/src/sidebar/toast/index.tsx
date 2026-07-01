@@ -6,6 +6,7 @@ import { cn } from "@hypr/utils";
 
 import { Toast } from "./component";
 import {
+  CONSENT_AUTO_SEND_CHAT_TOAST_ID,
   createDevtoolsToastPreview,
   createToastRegistry,
   getToastToShow,
@@ -17,6 +18,7 @@ import { useAuth } from "~/auth";
 import { useNotifications } from "~/contexts/notifications";
 import { useConfigValues } from "~/shared/config";
 import { useMountEffect } from "~/shared/hooks/useMountEffect";
+import * as settings from "~/store/tinybase/store/settings";
 import { useDevtoolsToastPreview } from "~/store/zustand/devtools-toast-preview";
 import { useTabs } from "~/store/zustand/tabs";
 import { useToastAction } from "~/store/zustand/toast-action";
@@ -68,11 +70,13 @@ export function ToastArea({
     current_llm_model,
     current_stt_provider,
     current_stt_model,
+    consent_auto_send_chat,
   } = useConfigValues([
     "current_llm_provider",
     "current_llm_model",
     "current_stt_provider",
     "current_stt_model",
+    "consent_auto_send_chat",
   ] as const);
   const hasLLMConfigured = !!(current_llm_provider && current_llm_model);
   const hasSttConfigured = isConfiguredSttModel(
@@ -103,6 +107,12 @@ export function ToastArea({
     (state) => state.updateSettingsTabState,
   );
   const setToastActionTarget = useToastAction((state) => state.setTarget);
+  const setConsentAutoSendChat = settings.UI.useSetValueCallback(
+    "consent_auto_send_chat",
+    () => true,
+    [],
+    settings.STORE_ID,
+  );
 
   const handleSignIn = useCallback(async () => {
     await auth?.signIn();
@@ -128,6 +138,15 @@ export function ToastArea({
     openAiTab("transcription");
   }, [openAiTab, setToastActionTarget]);
 
+  const handleEnableConsentAutoSendChat = useCallback(() => {
+    setConsentAutoSendChat();
+    dismissToast(CONSENT_AUTO_SEND_CHAT_TOAST_ID);
+  }, [dismissToast, setConsentAutoSendChat]);
+
+  const handleDismissConsentAutoSendChat = useCallback(() => {
+    dismissToast(CONSENT_AUTO_SEND_CHAT_TOAST_ID);
+  }, [dismissToast]);
+
   const registry = useMemo(
     () =>
       createToastRegistry({
@@ -135,6 +154,7 @@ export function ToastArea({
         isAuthLoading,
         hasLLMConfigured,
         hasSttConfigured,
+        consentAutoSendChatEnabled: consent_auto_send_chat,
         hasProSttConfigured,
         hasProLlmConfigured,
         isAiTranscriptionTabActive,
@@ -148,12 +168,15 @@ export function ToastArea({
         onSignIn: handleSignIn,
         onOpenLLMSettings: handleOpenLLMSettings,
         onOpenSTTSettings: handleOpenSTTSettings,
+        onEnableConsentAutoSendChat: handleEnableConsentAutoSendChat,
+        onDismissConsentAutoSendChat: handleDismissConsentAutoSendChat,
       }),
     [
       isAuthenticated,
       isAuthLoading,
       hasLLMConfigured,
       hasSttConfigured,
+      consent_auto_send_chat,
       hasProSttConfigured,
       hasProLlmConfigured,
       isAiTranscriptionTabActive,
@@ -167,6 +190,8 @@ export function ToastArea({
       handleSignIn,
       handleOpenLLMSettings,
       handleOpenSTTSettings,
+      handleEnableConsentAutoSendChat,
+      handleDismissConsentAutoSendChat,
     ],
   );
 
