@@ -8,14 +8,39 @@ import type { EditorView } from "~/store/zustand/tabs/schema";
 const hoisted = vi.hoisted(() => ({
   editorTabs: [{ type: "raw" }, { type: "transcript" }] as EditorView[],
   hotkeys: [] as Array<{ keys: string; callback: () => void }>,
+  focusAtTrailingEmptyLine: vi.fn(),
   onBeforeTabChange: vi.fn(),
   sessionMode: "inactive",
   updateSessionTabState: vi.fn(),
 }));
 
-vi.mock("./enhanced", () => ({
-  Enhanced: () => <div data-testid="enhanced-editor" />,
-}));
+vi.mock("./enhanced", async () => {
+  const React = await vi.importActual<typeof import("react")>("react");
+
+  return {
+    Enhanced: React.forwardRef((_props, ref) => {
+      React.useImperativeHandle(
+        ref,
+        () => ({
+          view: null,
+          commands: {
+            focus: () => {},
+            focusAtStart: () => {},
+            focusAtTrailingEmptyLine: hoisted.focusAtTrailingEmptyLine,
+            focusAtPixelWidth: () => {},
+            insertAtStartAndFocus: () => {},
+            replaceContent: () => {},
+            setSearch: () => {},
+            replace: () => {},
+          },
+        }),
+        [],
+      );
+
+      return React.createElement("div", { "data-testid": "enhanced-editor" });
+    }),
+  };
+});
 
 vi.mock("./header", () => ({
   Header: ({
@@ -46,9 +71,40 @@ vi.mock("./header", () => ({
   useEditorTabs: () => hoisted.editorTabs,
 }));
 
-vi.mock("./raw", () => ({
-  RawEditor: () => <div data-testid="raw-editor" />,
-}));
+vi.mock("./raw", async () => {
+  const React = await vi.importActual<typeof import("react")>("react");
+
+  return {
+    RawEditor: React.forwardRef((_props, ref) => {
+      React.useImperativeHandle(
+        ref,
+        () => ({
+          view: null,
+          commands: {
+            focus: () => {},
+            focusAtStart: () => {},
+            focusAtTrailingEmptyLine: hoisted.focusAtTrailingEmptyLine,
+            focusAtPixelWidth: () => {},
+            insertAtStartAndFocus: () => {},
+            replaceContent: () => {},
+            setSearch: () => {},
+            replace: () => {},
+          },
+        }),
+        [],
+      );
+
+      return React.createElement(
+        "div",
+        { "data-testid": "raw-editor" },
+        React.createElement("div", {
+          className: "ProseMirror",
+          "data-testid": "mock-prosemirror",
+        }),
+      );
+    }),
+  };
+});
 
 vi.mock("./search/bar", () => ({
   SearchBar: () => <div data-testid="search-bar" />,
@@ -140,6 +196,7 @@ describe("NoteInput tab selection", () => {
 
   beforeEach(() => {
     hoisted.hotkeys = [];
+    hoisted.focusAtTrailingEmptyLine.mockClear();
     hoisted.onBeforeTabChange.mockClear();
     hoisted.sessionMode = "inactive";
     hoisted.updateSessionTabState.mockClear();
@@ -199,5 +256,24 @@ describe("NoteInput tab selection", () => {
     renderNoteInput();
 
     expect(screen.getByTestId("is-transcribing").textContent).toBe("true");
+  });
+
+  it("focuses the trailing body line when blank editor space is clicked", () => {
+    renderNoteInput();
+
+    const scrollContainer = screen.getByTestId("raw-editor").parentElement;
+    expect(scrollContainer).not.toBeNull();
+
+    fireEvent.mouseDown(scrollContainer!, { button: 0 });
+
+    expect(hoisted.focusAtTrailingEmptyLine).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets ProseMirror handle clicks inside the document", () => {
+    renderNoteInput();
+
+    fireEvent.mouseDown(screen.getByTestId("mock-prosemirror"), { button: 0 });
+
+    expect(hoisted.focusAtTrailingEmptyLine).not.toHaveBeenCalled();
   });
 });

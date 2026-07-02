@@ -1,6 +1,7 @@
 import type { EditorView } from "prosemirror-view";
 import {
   forwardRef,
+  type MouseEventHandler,
   type UIEventHandler,
   useCallback,
   useDeferredValue,
@@ -184,12 +185,27 @@ export const NoteInput = forwardRef<
       search?.close();
     }, [currentTab]);
 
-    const handleContainerClick = () => {
+    const handleContainerMouseDown: MouseEventHandler<HTMLDivElement> = (
+      event,
+    ) => {
       if (!isEditableTab) {
         return;
       }
 
-      internalEditorRef.current?.commands.focus();
+      if (event.button !== 0) {
+        return;
+      }
+
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest(".ProseMirror") !== null
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      internalEditorRef.current?.commands.focusAtTrailingEmptyLine();
     };
 
     return (
@@ -219,7 +235,7 @@ export const NoteInput = forwardRef<
               scrollRef.current = node;
               setContainer(node);
             }}
-            onClick={handleContainerClick}
+            onMouseDown={handleContainerMouseDown}
             onScroll={onScroll}
             className={cn([
               "h-full px-3",
