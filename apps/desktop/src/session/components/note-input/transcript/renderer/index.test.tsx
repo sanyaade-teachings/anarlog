@@ -151,9 +151,7 @@ describe("TranscriptViewer", () => {
     );
   });
 
-  it("does not show a scroll chip before scroll movement starts", () => {
-    mocks.scrollDetection.isAtBottom = false;
-
+  it("does not show scroll controls when the transcript cannot scroll", () => {
     render(
       <TranscriptViewer
         transcriptIds={["transcript-1"]}
@@ -163,14 +161,15 @@ describe("TranscriptViewer", () => {
       />,
     );
 
-    expect(screen.queryByRole("button", { name: "Go to bottom" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Go to top" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Scroll to top" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Scroll to bottom" }),
+    ).toBeNull();
   });
 
-  it("shows the bottom chip after upward scroll movement", () => {
+  it("renders right-side scroll controls when the transcript can scroll", () => {
     mocks.scrollDetection.isAtTop = false;
     mocks.scrollDetection.isAtBottom = false;
-    mocks.scrollDetection.scrollTarget = "bottom";
 
     render(
       <TranscriptViewer
@@ -231,7 +230,7 @@ describe("TranscriptViewer", () => {
     expect(button.className).not.toContain("shadow");
     expect(button.className).not.toContain("scale");
     expect(button.style.top).toBe(
-      "var(--transcript-scroll-chip-top, calc(1.5rem + env(safe-area-inset-top)))",
+      "var(--transcript-scroll-chip-top, calc(0.75rem + env(safe-area-inset-top)))",
     );
     expect(button.style.bottom).toBe("");
     expect(screen.queryByRole("button", { name: "Go to bottom" })).toBeNull();
@@ -297,6 +296,11 @@ describe("TranscriptViewer", () => {
       />,
     );
 
-    expect(screen.queryByRole("button", { name: "Go to top" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Scroll to top" }),
+    ).not.toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Scroll to bottom" }),
+    ).not.toBeNull();
   });
 });
