@@ -77,10 +77,6 @@ export function getChangedSessionIds(
       table: "enhanced_notes",
       extractId: (id, tables) => tables.enhanced_notes?.[id]?.session_id,
     },
-    {
-      table: "session_key_facts",
-      extractId: (id, tables) => tables.session_key_facts?.[id]?.session_id,
-    },
   ]);
 
   const changedSessionIds = new Set(result?.changedIds ?? []);
@@ -136,8 +132,7 @@ export function getSessionSaveScope(
       hasSessionCellChange(changedTables, SESSION_META_CELLS) ||
       hasTableChange(changedTables, "mapping_session_participant") ||
       hasTableChange(changedTables, "mapping_tag_session") ||
-      hasTableChange(changedTables, "tags") ||
-      hasTableChange(changedTables, "session_key_facts"),
+      hasTableChange(changedTables, "tags"),
     transcript:
       sessionPathChanged || hasTableChange(changedTables, "transcripts"),
     note:

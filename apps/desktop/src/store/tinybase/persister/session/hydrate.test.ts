@@ -51,7 +51,6 @@ describe("hydrateSessionContent", () => {
         mapping_tag_session: {},
         transcripts: {},
         enhanced_notes: {},
-        session_key_facts: {},
       }),
     );
 

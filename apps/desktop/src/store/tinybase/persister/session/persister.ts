@@ -31,7 +31,6 @@ export function createSessionPersister(store: Store) {
       { tableName: "mapping_tag_session", foreignKey: "session_id" },
       { tableName: "transcripts", foreignKey: "session_id" },
       { tableName: "enhanced_notes", foreignKey: "session_id" },
-      { tableName: "session_key_facts", foreignKey: "session_id" },
     ],
     loadAll: (dataDir) =>
       loadAllSessionData(dataDir, { includeContent: false }),

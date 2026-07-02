@@ -14,7 +14,6 @@ import {
   mappingSessionParticipantSchema,
   mappingTagSessionSchema,
   organizationSchema,
-  sessionKeyFactsSchema,
   sessionSchema,
   tagSchema,
   taskSchema,
@@ -136,14 +135,6 @@ export const tableSchemaForTinybase = {
     position: { type: "number" },
     title: { type: "string" },
   } as const satisfies InferTinyBaseSchema<typeof enhancedNoteSchema>,
-  session_key_facts: {
-    user_id: { type: "string" },
-    session_id: { type: "string" },
-    created_at: { type: "string" },
-    updated_at: { type: "string" },
-    content: { type: "string" },
-    source_hash: { type: "string" },
-  } as const satisfies InferTinyBaseSchema<typeof sessionKeyFactsSchema>,
   tasks: {
     user_id: { type: "string" },
     task_id: { type: "string" },
