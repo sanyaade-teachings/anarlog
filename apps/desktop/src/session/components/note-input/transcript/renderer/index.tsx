@@ -102,24 +102,7 @@ export function TranscriptViewer({
         ? [LIVE_TRANSCRIPT_PLACEHOLDER_ID]
         : [];
 
-  const scrollChip =
-    chat.mode === "FloatingOpen"
-      ? null
-      : currentActive && scrollTarget === "bottom" && !isAtBottom
-        ? {
-            icon: ArrowDownIcon,
-            label: "Go to bottom",
-            onClick: scrollToBottom,
-          }
-        : currentActive && scrollTarget === "top" && !isAtTop
-          ? {
-              icon: ArrowUpIcon,
-              label: "Go to top",
-              onClick: scrollToTop,
-            }
-          : null;
-  const ScrollChipIcon = scrollChip?.icon;
-  const isBottomScrollChip = scrollTarget === "bottom";
+  const canScrollTranscript = !isAtTop || !isAtBottom;
 
   const handleSelectionAction = (action: string, selectedText: string) => {
     if (action === "copy") {

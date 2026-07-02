@@ -189,6 +189,27 @@ describe("TranscriptViewer", () => {
     expect(mocks.scrollToBottom).toHaveBeenCalledTimes(1);
   });
 
+  it("shows the bottom chip after upward scroll movement in inactive sessions", () => {
+    mocks.scrollDetection.isAtTop = false;
+    mocks.scrollDetection.isAtBottom = false;
+    mocks.scrollDetection.scrollTarget = "bottom";
+
+    render(
+      <TranscriptViewer
+        transcriptIds={["transcript-1"]}
+        liveSegments={[]}
+        currentActive={false}
+        scrollRef={createRef()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Go to bottom" });
+    button.click();
+
+    expect(screen.queryByRole("button", { name: "Go to top" })).toBeNull();
+    expect(mocks.scrollToBottom).toHaveBeenCalledTimes(1);
+  });
+
   it("shows the top chip after downward scroll movement", () => {
     mocks.scrollDetection.isAtTop = false;
     mocks.scrollDetection.scrollTarget = "top";
@@ -213,6 +234,26 @@ describe("TranscriptViewer", () => {
       "var(--transcript-scroll-chip-top, calc(1.5rem + env(safe-area-inset-top)))",
     );
     expect(button.style.bottom).toBe("");
+    expect(screen.queryByRole("button", { name: "Go to bottom" })).toBeNull();
+    expect(mocks.scrollToTop).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the top chip after downward scroll movement in inactive sessions", () => {
+    mocks.scrollDetection.isAtTop = false;
+    mocks.scrollDetection.scrollTarget = "top";
+
+    render(
+      <TranscriptViewer
+        transcriptIds={["transcript-1"]}
+        liveSegments={[]}
+        currentActive={false}
+        scrollRef={createRef()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Go to top" });
+    button.click();
+
     expect(screen.queryByRole("button", { name: "Go to bottom" })).toBeNull();
     expect(mocks.scrollToTop).toHaveBeenCalledTimes(1);
   });
