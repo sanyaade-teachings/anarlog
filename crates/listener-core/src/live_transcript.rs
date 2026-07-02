@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use hypr_transcript::{
     FinalizedWord, IdentityAssignment, PartialWord, SegmentBuilderOptions, SegmentKey, SegmentWord,
@@ -67,6 +67,7 @@ pub struct LiveTranscriptEngine {
     processor: TranscriptProcessor,
     normalizer: TranscriptNormalizer,
     rendered_segments: RenderedSegmentState,
+    echo_suppressor: CrossChannelEchoSuppressor,
     max_speaker_index: Option<i32>,
 }
 
@@ -90,6 +91,7 @@ impl LiveTranscriptEngine {
                 .with_partial_finalization(normalizer.finalize_partials())
                 .with_flush_partial_finalization(normalizer.flush_partials()),
             normalizer,
+            echo_suppressor: CrossChannelEchoSuppressor::default(),
             rendered_segments: RenderedSegmentState {
                 channel_assignments,
                 segment_options: Some(segment_options),
@@ -103,8 +105,12 @@ impl LiveTranscriptEngine {
         let mut normalized = response.clone();
         self.normalizer.normalize(&mut normalized);
         clamp_response_speaker_indices(&mut normalized, self.max_speaker_index);
-        let transcript_delta: LiveTranscriptDelta = self.processor.process(&normalized)?.into();
+        let mut transcript_delta: LiveTranscriptDelta = self.processor.process(&normalized)?.into();
+        self.echo_suppressor.apply(&mut transcript_delta);
         let segment_delta = self.rendered_segments.apply_delta(&transcript_delta);
+        if transcript_delta.is_empty() && segment_delta.is_none() {
+            return None;
+        }
         Some(LiveTranscriptUpdate {
             transcript_delta,
             segment_delta,
@@ -127,7 +133,8 @@ impl LiveTranscriptEngine {
     }
 
     pub fn flush(&mut self) -> Option<LiveTranscriptUpdate> {
-        let transcript_delta: LiveTranscriptDelta = self.processor.flush().into();
+        let mut transcript_delta: LiveTranscriptDelta = self.processor.flush().into();
+        self.echo_suppressor.apply(&mut transcript_delta);
         let segment_delta = self.rendered_segments.apply_delta(&transcript_delta);
         if transcript_delta.is_empty() && segment_delta.is_none() {
             return None;
@@ -138,6 +145,337 @@ impl LiveTranscriptEngine {
             segment_delta,
         })
     }
+}
+
+#[derive(Default)]
+struct CrossChannelEchoSuppressor {
+    final_words: Vec<EchoWord>,
+    echo_tails: Vec<EchoTail>,
+}
+
+#[derive(Clone)]
+struct EchoWord {
+    token: Option<String>,
+    start_ms: i64,
+    end_ms: i64,
+    channel: i32,
+}
+
+#[derive(Clone)]
+struct EchoTail {
+    channel: i32,
+    reference_channel: i32,
+    last_candidate_end_ms: i64,
+}
+
+struct DuplicateRun {
+    candidate_start: usize,
+    reference_start: usize,
+    len: usize,
+}
+
+const ECHO_SUPPRESSION_WINDOW_MS: i64 = 4_000;
+const ECHO_SUPPRESSION_HISTORY_MS: i64 = 30_000;
+const ECHO_SUPPRESSION_TAIL_GAP_MS: i64 = 2_000;
+const ECHO_SUPPRESSION_MIN_TOKENS: usize = 3;
+
+impl CrossChannelEchoSuppressor {
+    fn apply(&mut self, delta: &mut LiveTranscriptDelta) {
+        self.suppress_new_words(delta);
+        self.suppress_partials(delta);
+        self.prune_history();
+    }
+
+    fn suppress_new_words(&mut self, delta: &mut LiveTranscriptDelta) {
+        if delta.new_words.is_empty() {
+            return;
+        }
+
+        let mut channel_order = delta
+            .new_words
+            .iter()
+            .fold(BTreeMap::<i32, i64>::new(), |mut acc, word| {
+                acc.entry(word.channel)
+                    .and_modify(|start_ms| *start_ms = (*start_ms).min(word.start_ms))
+                    .or_insert(word.start_ms);
+                acc
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        channel_order.sort_by_key(|(channel, start_ms)| (*start_ms, *channel));
+
+        let mut references = self.final_words.clone();
+        let mut suppressed = BTreeSet::new();
+        let mut echo_tails = Vec::new();
+
+        for (channel, _) in channel_order {
+            let indexed = delta
+                .new_words
+                .iter()
+                .enumerate()
+                .filter(|(_, word)| word.channel == channel)
+                .map(|(index, word)| (index, EchoWord::from_final(word)))
+                .collect::<Vec<_>>();
+            let candidates = indexed
+                .iter()
+                .map(|(_, word)| word.clone())
+                .collect::<Vec<_>>();
+            let runs = duplicate_runs(&candidates, &references);
+            let mut local_suppressed = BTreeSet::new();
+
+            for run in runs {
+                for index in run.candidate_start..run.candidate_start + run.len {
+                    if let Some((original_index, _)) = indexed.get(index) {
+                        suppressed.insert(*original_index);
+                        local_suppressed.insert(index);
+                    }
+                }
+
+                if let (Some(candidate), Some(reference)) = (
+                    candidates.get(run.candidate_start + run.len - 1),
+                    references.get(run.reference_start + run.len - 1),
+                ) {
+                    echo_tails.push(EchoTail::from_match(candidate, reference));
+                }
+            }
+
+            for (index, (original_index, word)) in indexed.into_iter().enumerate() {
+                if local_suppressed.contains(&index) {
+                    continue;
+                }
+
+                if let Some(reference) = references
+                    .iter()
+                    .find(|reference| is_echo_tail_match(&word, reference, &self.echo_tails))
+                {
+                    suppressed.insert(original_index);
+                    echo_tails.push(EchoTail::from_match(&word, reference));
+                } else {
+                    references.push(word);
+                }
+            }
+        }
+
+        if !suppressed.is_empty() {
+            let mut index = 0usize;
+            delta.new_words.retain(|_| {
+                let keep = !suppressed.contains(&index);
+                index += 1;
+                keep
+            });
+        }
+
+        self.final_words
+            .extend(delta.new_words.iter().map(EchoWord::from_final));
+        self.echo_tails.extend(echo_tails);
+    }
+
+    fn suppress_partials(&self, delta: &mut LiveTranscriptDelta) {
+        if delta.partials.is_empty() {
+            return;
+        }
+
+        let mut channel_order = delta
+            .partials
+            .iter()
+            .fold(BTreeMap::<i32, i64>::new(), |mut acc, word| {
+                acc.entry(word.channel)
+                    .and_modify(|start_ms| *start_ms = (*start_ms).min(word.start_ms))
+                    .or_insert(word.start_ms);
+                acc
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        channel_order.sort_by_key(|(channel, start_ms)| (*start_ms, *channel));
+
+        let mut references = self.final_words.clone();
+        let mut suppressed = BTreeSet::new();
+
+        for (channel, _) in channel_order {
+            let indexed = delta
+                .partials
+                .iter()
+                .enumerate()
+                .filter(|(_, word)| word.channel == channel)
+                .map(|(index, word)| (index, EchoWord::from_partial(word)))
+                .collect::<Vec<_>>();
+            let candidates = indexed
+                .iter()
+                .map(|(_, word)| word.clone())
+                .collect::<Vec<_>>();
+            let runs = duplicate_runs(&candidates, &references);
+            let local_suppressed = runs
+                .into_iter()
+                .flat_map(|run| run.candidate_start..run.candidate_start + run.len)
+                .collect::<BTreeSet<_>>();
+
+            for index in &local_suppressed {
+                if let Some((original_index, _)) = indexed.get(*index) {
+                    suppressed.insert(*original_index);
+                }
+            }
+
+            for (index, (original_index, word)) in indexed.into_iter().enumerate() {
+                if local_suppressed.contains(&index) {
+                    continue;
+                }
+
+                if references
+                    .iter()
+                    .any(|reference| is_echo_tail_match(&word, reference, &self.echo_tails))
+                {
+                    suppressed.insert(original_index);
+                } else {
+                    references.push(word);
+                }
+            }
+        }
+
+        if !suppressed.is_empty() {
+            let mut index = 0usize;
+            delta.partials.retain(|_| {
+                let keep = !suppressed.contains(&index);
+                index += 1;
+                keep
+            });
+        }
+    }
+
+    fn prune_history(&mut self) {
+        let Some(max_end_ms) = self.final_words.iter().map(|word| word.end_ms).max() else {
+            return;
+        };
+        let min_end_ms = max_end_ms - ECHO_SUPPRESSION_HISTORY_MS;
+        self.final_words.retain(|word| word.end_ms >= min_end_ms);
+        self.echo_tails
+            .retain(|tail| tail.last_candidate_end_ms >= min_end_ms);
+    }
+}
+
+impl EchoWord {
+    fn from_final(word: &FinalizedWord) -> Self {
+        Self {
+            token: echo_token(&word.text),
+            start_ms: word.start_ms,
+            end_ms: word.end_ms,
+            channel: word.channel,
+        }
+    }
+
+    fn from_partial(word: &PartialWord) -> Self {
+        Self {
+            token: echo_token(&word.text),
+            start_ms: word.start_ms,
+            end_ms: word.end_ms,
+            channel: word.channel,
+        }
+    }
+}
+
+impl EchoTail {
+    fn from_match(candidate: &EchoWord, reference: &EchoWord) -> Self {
+        Self {
+            channel: candidate.channel,
+            reference_channel: reference.channel,
+            last_candidate_end_ms: candidate.end_ms,
+        }
+    }
+}
+
+fn duplicate_runs(candidates: &[EchoWord], references: &[EchoWord]) -> Vec<DuplicateRun> {
+    let mut runs = Vec::new();
+    let mut suppressed = BTreeSet::new();
+
+    for candidate_index in 0..candidates.len() {
+        if suppressed.contains(&candidate_index) {
+            continue;
+        }
+
+        for reference_index in 0..references.len() {
+            let run_len =
+                matching_run_len(candidates, references, candidate_index, reference_index);
+            if run_len < ECHO_SUPPRESSION_MIN_TOKENS {
+                continue;
+            }
+
+            for index in candidate_index..candidate_index + run_len {
+                suppressed.insert(index);
+            }
+            runs.push(DuplicateRun {
+                candidate_start: candidate_index,
+                reference_start: reference_index,
+                len: run_len,
+            });
+            break;
+        }
+    }
+
+    runs
+}
+
+fn matching_run_len(
+    candidates: &[EchoWord],
+    references: &[EchoWord],
+    mut candidate_index: usize,
+    mut reference_index: usize,
+) -> usize {
+    let mut len = 0usize;
+
+    while let (Some(candidate), Some(reference)) = (
+        candidates.get(candidate_index),
+        references.get(reference_index),
+    ) {
+        if !is_echo_match(candidate, reference) {
+            break;
+        }
+
+        len += 1;
+        candidate_index += 1;
+        reference_index += 1;
+    }
+
+    len
+}
+
+fn is_echo_match(candidate: &EchoWord, reference: &EchoWord) -> bool {
+    if candidate.channel == reference.channel {
+        return false;
+    }
+
+    if candidate
+        .token
+        .as_ref()
+        .zip(reference.token.as_ref())
+        .is_none_or(|(candidate, reference)| candidate != reference)
+    {
+        return false;
+    }
+
+    (candidate.start_ms - reference.start_ms).abs() <= ECHO_SUPPRESSION_WINDOW_MS
+        || (candidate.end_ms - reference.end_ms).abs() <= ECHO_SUPPRESSION_WINDOW_MS
+}
+
+fn is_echo_tail_match(candidate: &EchoWord, reference: &EchoWord, tails: &[EchoTail]) -> bool {
+    if !is_echo_match(candidate, reference) {
+        return false;
+    }
+
+    tails.iter().any(|tail| {
+        tail.channel == candidate.channel
+            && tail.reference_channel == reference.channel
+            && candidate.start_ms >= tail.last_candidate_end_ms - 500
+            && candidate.start_ms - tail.last_candidate_end_ms <= ECHO_SUPPRESSION_TAIL_GAP_MS
+    })
+}
+
+fn echo_token(text: &str) -> Option<String> {
+    let token = text
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '\'')
+        .flat_map(|ch| ch.to_lowercase())
+        .collect::<String>();
+
+    (!token.is_empty()).then_some(token)
 }
 
 fn max_speaker_index_for_participants(
@@ -1268,6 +1606,94 @@ mod tests {
 
         assert_eq!(final_text.trim(), "hello world");
         assert!(flush_update.transcript_delta.partials.is_empty());
+    }
+
+    #[test]
+    fn live_engine_suppresses_later_cross_channel_echo_final_words() {
+        let mut engine = LiveTranscriptEngine::new("hyprnote", &[], None);
+        let phrase = "i was thinking about that";
+        let first =
+            transcript_response_at(phrase, words_from_text(phrase, 0.0, 1.0), true, 0, 0.0, 1.0);
+        let first_update = engine.process(&first).expect("first update");
+
+        let echo =
+            transcript_response_at(phrase, words_from_text(phrase, 1.2, 1.0), true, 1, 1.2, 1.0);
+        let echo_update = engine.process(&echo).expect("echo update");
+        assert!(echo_update.transcript_delta.new_words.is_empty());
+        assert!(
+            echo_update
+                .transcript_delta
+                .partials
+                .iter()
+                .all(|word| word.channel == 0)
+        );
+
+        let flush_update = engine.flush().expect("flush update");
+        let final_text = first_update
+            .transcript_delta
+            .new_words
+            .iter()
+            .chain(flush_update.transcript_delta.new_words.iter())
+            .map(|word| word.text.as_str())
+            .collect::<String>();
+
+        assert_eq!(final_text.trim(), phrase);
+    }
+
+    #[test]
+    fn live_engine_suppresses_cross_channel_echo_partials() {
+        let mut engine = LiveTranscriptEngine::new("hyprnote", &[], None);
+        let phrase = "i was thinking about";
+        let first = transcript_response_at(
+            phrase,
+            words_from_text(phrase, 0.0, 1.0),
+            false,
+            0,
+            0.0,
+            1.0,
+        );
+        engine.process(&first).expect("first update");
+
+        let echo = transcript_response_at(
+            phrase,
+            words_from_text(phrase, 1.0, 1.0),
+            false,
+            1,
+            1.0,
+            1.0,
+        );
+        let update = engine.process(&echo).expect("echo update");
+
+        assert!(!update.transcript_delta.partials.is_empty());
+        assert!(
+            update
+                .transcript_delta
+                .partials
+                .iter()
+                .all(|word| word.channel == 0)
+        );
+    }
+
+    #[test]
+    fn live_engine_keeps_distinct_overlapping_cross_channel_words() {
+        let mut engine = LiveTranscriptEngine::new("hyprnote", &[], None);
+        let local = "i was thinking about that";
+        let remote = "completely different point here";
+        let first =
+            transcript_response_at(local, words_from_text(local, 0.0, 1.0), true, 0, 0.0, 1.0);
+        engine.process(&first).expect("first update");
+
+        let second =
+            transcript_response_at(remote, words_from_text(remote, 1.0, 1.0), true, 1, 1.0, 1.0);
+        let update = engine.process(&second).expect("second update");
+        let new_text = update
+            .transcript_delta
+            .new_words
+            .iter()
+            .map(|word| word.text.as_str())
+            .collect::<String>();
+
+        assert!(new_text.contains("completely different point"));
     }
 
     #[test]
