@@ -103,6 +103,24 @@ export function TranscriptViewer({
         : [];
 
   const canScrollTranscript = !isAtTop || !isAtBottom;
+  const scrollChip =
+    chat.mode === "FloatingOpen" || !canScrollTranscript
+      ? null
+      : scrollTarget === "bottom" && !isAtBottom
+        ? {
+            icon: ArrowDownIcon,
+            label: "Go to bottom",
+            onClick: scrollToBottom,
+          }
+        : scrollTarget === "top" && !isAtTop
+          ? {
+              icon: ArrowUpIcon,
+              label: "Go to top",
+              onClick: scrollToTop,
+            }
+          : null;
+  const ScrollChipIcon = scrollChip?.icon;
+  const isBottomScrollChip = scrollTarget === "bottom";
 
   const handleSelectionAction = (action: string, selectedText: string) => {
     if (action === "copy") {
