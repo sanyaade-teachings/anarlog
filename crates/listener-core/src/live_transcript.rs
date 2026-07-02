@@ -244,10 +244,13 @@ impl CrossChannelEchoSuppressor {
                     continue;
                 }
 
-                if let Some(reference) = references
-                    .iter()
-                    .find(|reference| is_echo_tail_match(&word, reference, &self.echo_tails))
-                {
+                if let Some(reference) = references.iter().find(|reference| {
+                    is_echo_tail_match(
+                        &word,
+                        reference,
+                        self.echo_tails.iter().chain(echo_tails.iter()),
+                    )
+                }) {
                     suppressed.insert(original_index);
                     echo_tails.push(EchoTail::from_match(&word, reference));
                 } else {
@@ -304,6 +307,17 @@ impl CrossChannelEchoSuppressor {
                 .map(|(_, word)| word.clone())
                 .collect::<Vec<_>>();
             let runs = duplicate_runs(&candidates, &references);
+            let mut echo_tails = Vec::new();
+
+            for run in &runs {
+                if let (Some(candidate), Some(reference)) = (
+                    candidates.get(run.candidate_start + run.len - 1),
+                    references.get(run.reference_start + run.len - 1),
+                ) {
+                    echo_tails.push(EchoTail::from_match(candidate, reference));
+                }
+            }
+
             let local_suppressed = runs
                 .into_iter()
                 .flat_map(|run| run.candidate_start..run.candidate_start + run.len)
@@ -320,11 +334,15 @@ impl CrossChannelEchoSuppressor {
                     continue;
                 }
 
-                if references
-                    .iter()
-                    .any(|reference| is_echo_tail_match(&word, reference, &self.echo_tails))
-                {
+                if let Some(reference) = references.iter().find(|reference| {
+                    is_echo_tail_match(
+                        &word,
+                        reference,
+                        self.echo_tails.iter().chain(echo_tails.iter()),
+                    )
+                }) {
                     suppressed.insert(original_index);
+                    echo_tails.push(EchoTail::from_match(&word, reference));
                 } else {
                     references.push(word);
                 }
@@ -455,12 +473,16 @@ fn is_echo_match(candidate: &EchoWord, reference: &EchoWord) -> bool {
         || (candidate.end_ms - reference.end_ms).abs() <= ECHO_SUPPRESSION_WINDOW_MS
 }
 
-fn is_echo_tail_match(candidate: &EchoWord, reference: &EchoWord, tails: &[EchoTail]) -> bool {
+fn is_echo_tail_match<'a>(
+    candidate: &EchoWord,
+    reference: &EchoWord,
+    tails: impl IntoIterator<Item = &'a EchoTail>,
+) -> bool {
     if !is_echo_match(candidate, reference) {
         return false;
     }
 
-    tails.iter().any(|tail| {
+    tails.into_iter().any(|tail| {
         tail.channel == candidate.channel
             && tail.reference_channel == reference.channel
             && candidate.start_ms >= tail.last_candidate_end_ms - 500
@@ -1638,6 +1660,28 @@ mod tests {
             .collect::<String>();
 
         assert_eq!(final_text.trim(), phrase);
+    }
+
+    #[test]
+    fn live_engine_chains_echo_tail_after_interrupted_duplicate_run() {
+        let mut engine = LiveTranscriptEngine::new("hyprnote", &[], None);
+        let reference = "one two three filler four five";
+        let echo = "one two three four five";
+        let first = transcript_response_at(
+            reference,
+            words_from_text(reference, 0.0, 1.0),
+            true,
+            0,
+            0.0,
+            1.0,
+        );
+        engine.process(&first).expect("first update");
+
+        let echo_response =
+            transcript_response_at(echo, words_from_text(echo, 1.0, 1.0), true, 1, 1.0, 1.0);
+        let echo_update = engine.process(&echo_response).expect("echo update");
+
+        assert!(echo_update.transcript_delta.new_words.is_empty());
     }
 
     #[test]
