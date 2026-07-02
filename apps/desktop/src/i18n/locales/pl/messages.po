@@ -821,10 +821,6 @@ msgstr ""
 msgid "Insert below"
 msgstr ""
 
-#: src/session/components/note-input/header.tsx:971
-msgid "Insights"
-msgstr ""
-
 #: src/settings/ai/llm/index.tsx:13
 #: src/sidebar/settings.tsx:100
 msgid "Intelligence"
@@ -939,7 +935,7 @@ msgstr ""
 msgid "Memo"
 msgstr ""
 
-#: src/session/components/note-input/header.tsx:294
+#: src/session/components/note-input/header.tsx:292
 msgid "Memos"
 msgstr ""
 
@@ -1280,17 +1276,8 @@ msgstr ""
 msgid "Refresh calendars"
 msgstr ""
 
-#: src/session/components/note-input/insights.tsx:138
-#: src/session/components/note-input/insights.tsx:156
-msgid "Regenerate insights"
-msgstr ""
-
 #: src/chat/components/message/normal.tsx:91
 msgid "Regenerate message"
-msgstr ""
-
-#: src/session/components/note-input/insights.tsx:156
-msgid "Regenerating insights"
 msgstr ""
 
 #: src/contacts/details.tsx:335
@@ -1381,7 +1368,7 @@ msgstr ""
 msgid "Respect Do-Not-Disturb mode"
 msgstr ""
 
-#: src/session/components/note-input/header.tsx:690
+#: src/session/components/note-input/header.tsx:688
 msgid "Resume"
 msgstr ""
 
@@ -1436,7 +1423,7 @@ msgstr ""
 msgid "Search people"
 msgstr ""
 
-#: src/session/components/note-input/header.tsx:1349
+#: src/session/components/note-input/header.tsx:1328
 #: src/templates/template-sidebar.tsx:354
 msgid "Search templates..."
 msgstr ""
@@ -1454,7 +1441,7 @@ msgstr ""
 msgid "Section actions"
 msgstr ""
 
-#: src/session/components/note-input/header.tsx:1415
+#: src/session/components/note-input/header.tsx:1394
 msgid "See all templates"
 msgstr ""
 
@@ -1512,7 +1499,7 @@ msgstr ""
 msgid "Send message"
 msgstr ""
 
-#: src/session/components/note-input/header.tsx:1456
+#: src/session/components/note-input/header.tsx:1435
 msgid "Session note tabs"
 msgstr ""
 
@@ -1674,7 +1661,7 @@ msgstr ""
 msgid "Starting your trial..."
 msgstr ""
 
-#: src/session/components/note-input/header.tsx:690
+#: src/session/components/note-input/header.tsx:688
 msgid "Stop"
 msgstr ""
 
@@ -1778,7 +1765,7 @@ msgstr ""
 msgid "Tip: The Anarlog team loves our users!"
 msgstr ""
 
-#: src/session/components/note-input/header.tsx:688
+#: src/session/components/note-input/header.tsx:686
 #: src/session/components/outer-header/overflow/export-modal.tsx:245
 #: src/session/components/outer-header/overflow/export-modal.tsx:295
 #: src/session/components/outer-header/overflow/export-modal.tsx:350
