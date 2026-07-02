@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   scrollDetection: {
     isAtTop: true,
     isAtBottom: true,
+    canScroll: false,
     autoScrollEnabled: true,
     scrollTarget: null as "top" | "bottom" | null,
   },
@@ -86,6 +87,7 @@ describe("TranscriptViewer", () => {
     mocks.scrollToTop.mockReset();
     mocks.scrollDetection.isAtTop = true;
     mocks.scrollDetection.isAtBottom = true;
+    mocks.scrollDetection.canScroll = false;
     mocks.scrollDetection.autoScrollEnabled = true;
     mocks.scrollDetection.scrollTarget = null;
     mocks.chatMode = "FloatingClosed";
@@ -170,6 +172,7 @@ describe("TranscriptViewer", () => {
   it("renders right-side scroll controls when the transcript can scroll", () => {
     mocks.scrollDetection.isAtTop = false;
     mocks.scrollDetection.isAtBottom = false;
+    mocks.scrollDetection.canScroll = true;
 
     render(
       <TranscriptViewer
@@ -203,9 +206,32 @@ describe("TranscriptViewer", () => {
     expect(mocks.scrollToBottom).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps scroll controls visible when overflow exists inside both edge thresholds", () => {
+    mocks.scrollDetection.isAtTop = true;
+    mocks.scrollDetection.isAtBottom = true;
+    mocks.scrollDetection.canScroll = true;
+
+    render(
+      <TranscriptViewer
+        transcriptIds={["transcript-1"]}
+        liveSegments={[]}
+        currentActive
+        scrollRef={createRef()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Scroll to top" }),
+    ).not.toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Scroll to bottom" }),
+    ).not.toBeNull();
+  });
+
   it("disables the top control at the top", () => {
     mocks.scrollDetection.isAtTop = true;
     mocks.scrollDetection.isAtBottom = false;
+    mocks.scrollDetection.canScroll = true;
 
     render(
       <TranscriptViewer
@@ -232,6 +258,7 @@ describe("TranscriptViewer", () => {
   it("disables the bottom control at the bottom", () => {
     mocks.scrollDetection.isAtTop = false;
     mocks.scrollDetection.isAtBottom = true;
+    mocks.scrollDetection.canScroll = true;
 
     render(
       <TranscriptViewer
@@ -258,6 +285,7 @@ describe("TranscriptViewer", () => {
   it("keeps scroll controls available while floating chat is expanded", () => {
     mocks.scrollDetection.isAtTop = false;
     mocks.scrollDetection.isAtBottom = false;
+    mocks.scrollDetection.canScroll = true;
     mocks.chatMode = "FloatingOpen";
 
     render(

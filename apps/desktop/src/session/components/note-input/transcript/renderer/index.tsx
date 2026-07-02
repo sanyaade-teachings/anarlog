@@ -52,6 +52,7 @@ export function TranscriptViewer({
   const {
     isAtTop,
     isAtBottom,
+    canScroll,
     autoScrollEnabled,
     scrollToTop,
     scrollToBottom,
@@ -99,8 +100,6 @@ export function TranscriptViewer({
         ? [LIVE_TRANSCRIPT_PLACEHOLDER_ID]
         : [];
 
-  const canScrollTranscript = !isAtTop || !isAtBottom;
-
   const handleSelectionAction = (action: string, selectedText: string) => {
     if (action === "copy") {
       void navigator.clipboard.writeText(selectedText);
@@ -146,7 +145,7 @@ export function TranscriptViewer({
         />
       </div>
 
-      {canScrollTranscript && (
+      {canScroll && (
         <div
           data-transcript-scroll-controls
           className={cn([
