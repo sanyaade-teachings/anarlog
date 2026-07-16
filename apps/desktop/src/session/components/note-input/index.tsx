@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  type MouseEventHandler,
   type UIEventHandler,
   useCallback,
   useDeferredValue,
@@ -258,12 +259,40 @@ const NoteInputContent = forwardRef<
       search?.close();
     }, [currentTab]);
 
-    const handleContainerClick = () => {
+    const handleContainerMouseDown: MouseEventHandler<HTMLDivElement> = (
+      event,
+    ) => {
       if (!isEditableTab) {
         return;
       }
 
-      internalEditorRef.current?.commands.focus();
+      if (event.button !== 0) {
+        return;
+      }
+
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+
+      if (target.closest(".ProseMirror") !== null) {
+        return;
+      }
+
+      if (
+        target.closest(
+          "button, a, input, textarea, select, [role='button'], [contenteditable='true']",
+        ) !== null
+      ) {
+        return;
+      }
+
+      if (event.currentTarget.querySelector(".ProseMirror") === null) {
+        return;
+      }
+
+      event.preventDefault();
+      internalEditorRef.current?.commands.focusAtTrailingEmptyLine();
     };
 
     return (
@@ -289,7 +318,7 @@ const NoteInputContent = forwardRef<
         <div className="relative flex-1 overflow-hidden">
           <div
             ref={scrollRef}
-            onClick={handleContainerClick}
+            onMouseDown={handleContainerMouseDown}
             onScroll={onScroll}
             className={cn([
               "h-full px-3",
