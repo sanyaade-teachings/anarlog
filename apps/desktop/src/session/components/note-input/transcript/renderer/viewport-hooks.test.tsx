@@ -28,6 +28,51 @@ function setScrollMetrics(
 }
 
 describe("useScrollDetection", () => {
+  it("keeps one scroll edge available when the viewport is near both edges", () => {
+    const element = document.createElement("div");
+    setScrollMetrics(element, {
+      clientHeight: 100,
+      scrollHeight: 150,
+      scrollTop: 0,
+    });
+    const containerRef = createRef<HTMLDivElement>();
+    containerRef.current = element;
+
+    const { result } = renderHook(() =>
+      useScrollDetection(containerRef, false),
+    );
+
+    expect(result.current.canScroll).toBe(true);
+    expect(result.current.isAtTop).toBe(true);
+    expect(result.current.isAtBottom).toBe(false);
+    expect(result.current.isNearBottom).toBe(true);
+
+    act(() => {
+      element.scrollTop = 50;
+      element.dispatchEvent(new Event("scroll"));
+    });
+
+    expect(result.current.isAtTop).toBe(false);
+    expect(result.current.isAtBottom).toBe(true);
+    expect(result.current.isNearBottom).toBe(true);
+  });
+
+  it("keeps the live transcript pinned near the exact bottom edge", () => {
+    const element = document.createElement("div");
+    setScrollMetrics(element, {
+      clientHeight: 100,
+      scrollHeight: 1000,
+      scrollTop: 850,
+    });
+    const containerRef = createRef<HTMLDivElement>();
+    containerRef.current = element;
+
+    const { result } = renderHook(() => useScrollDetection(containerRef, true));
+
+    expect(result.current.isAtBottom).toBe(false);
+    expect(result.current.isNearBottom).toBe(true);
+  });
+
   it("preserves manual scroll-away state when a transcript becomes active again", () => {
     const element = document.createElement("div");
     setScrollMetrics(element, {
