@@ -40,6 +40,13 @@ vi.mock("~/settings/queries", () => ({
   })),
 }));
 
+vi.mock("~/settings/queries", () => ({
+  getStoredSettingValues: vi.fn(async () => ({
+    values: { capture_meeting_chat: captureSettingState.value },
+    hasValues: new Set(["capture_meeting_chat"]),
+  })),
+}));
+
 const capturedMessage = {
   id: "msg-1",
   platform: "zoom" as const,
@@ -292,13 +299,13 @@ describe("startMeetingChatCapture", () => {
     });
   });
 
-  test("excludes configured message text while retaining other chat", async () => {
-    const excludedText = "Automated meeting message";
+  test("excludes the generated disclosure while retaining participant chat", async () => {
+    const disclosure = "Anarlog disclosure https://anarlog.so";
     captureMeetingChatMessagesMock.mockResolvedValue(captureResult([]));
     const stop = startMeetingChatCapture({
       sessionId: "session-1",
       isEnabled: () => true,
-      excludedTexts: [excludedText],
+      excludedTexts: [disclosure],
     });
     await vi.advanceTimersByTimeAsync(0);
 
@@ -306,10 +313,10 @@ describe("startMeetingChatCapture", () => {
       captureResult([
         {
           ...capturedMessage,
-          id: "excluded-message",
+          id: "disclosure",
           direction: "outgoing",
-          text: `  ${excludedText.replace(" ", "\n")}  `,
-          links: [],
+          text: `  ${disclosure.replace(" ", "\n")}  `,
+          links: ["https://anarlog.so"],
         },
         capturedMessage,
       ]),
