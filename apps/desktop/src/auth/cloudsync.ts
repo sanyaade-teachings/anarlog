@@ -1,11 +1,14 @@
 import type { AuthChangeEvent, Session } from "@supabase/supabase-js";
 
+import type { CloudsyncWorkspaceProjection } from "@hypr/plugin-db";
 import {
   bindCloudsyncAccount,
   configureCloudsyncToken,
+  execute,
   getCloudsyncStatus,
   suspendCloudsync,
 } from "@hypr/plugin-db";
+import { commands as fsSyncCommands } from "@hypr/plugin-fs-sync";
 
 import {
   startCloudsyncInitialSyncProgress,
@@ -17,22 +20,37 @@ import { env } from "~/env";
 const REFRESH_LEAD_MS = 2 * 60 * 1000;
 const RETRY_DELAY_MS = 60 * 1000;
 const MIN_REFRESH_DELAY_MS = 1000;
-const EXCHANGE_TIMEOUT_MS = 10 * 1000;
+const EXCHANGE_TIMEOUT_MS = 25 * 1000;
+const EVICTION_RETRY_DELAY_MS = 30 * 1000;
 
 export type CloudsyncAuthChangeResult = "ok" | "account_mismatch";
 
 type CloudsyncAccountMismatchHandler = () => Promise<void>;
 
-type CloudsyncCredentials = {
+type CloudsyncCredentialCore = {
   databaseId: string;
   token: string;
   expiresAt: string;
   workspaceId: string;
 };
 
+type LegacyCloudsyncCredentials = CloudsyncCredentialCore & {
+  accountUserId?: undefined;
+  personalWorkspaceId?: undefined;
+  workspaces?: undefined;
+};
+
+type ProjectedCloudsyncCredentials = CloudsyncCredentialCore &
+  CloudsyncWorkspaceProjection;
+
+type CloudsyncCredentials =
+  | LegacyCloudsyncCredentials
+  | ProjectedCloudsyncCredentials;
+
 let generation = 0;
 let exchangeController: AbortController | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let evictionRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let pluginOperation = Promise.resolve();
 
 function beginTransition() {
@@ -43,6 +61,10 @@ function beginTransition() {
   if (refreshTimer) {
     clearTimeout(refreshTimer);
     refreshTimer = null;
+  }
+  if (evictionRetryTimer) {
+    clearTimeout(evictionRetryTimer);
+    evictionRetryTimer = null;
   }
 
   return generation;
@@ -55,6 +77,116 @@ function enqueuePluginOperation<T>(operation: () => Promise<T>) {
     () => {},
   );
   return next;
+}
+
+async function flushCloudsyncSessionEvictions(): Promise<boolean> {
+  const batchSize = 128;
+
+  while (true) {
+    let rows: { sessionId: string; workspaceId: string }[];
+    try {
+      rows = await execute(
+        `
+          SELECT
+            eviction.session_id AS sessionId,
+            eviction.workspace_id AS workspaceId
+          FROM cloudsync_session_evictions AS eviction
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM workspace_memberships AS membership
+            WHERE membership.workspace_id = eviction.workspace_id
+              AND membership.deleted_at IS NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM sessions
+            WHERE sessions.id = eviction.session_id
+          )
+          ORDER BY eviction.queued_at, eviction.session_id
+          LIMIT ?
+        `,
+        [batchSize],
+      );
+    } catch (error) {
+      console.warn("[cloudsync] session eviction queue unavailable", error);
+      return true;
+    }
+
+    if (rows.length === 0) return false;
+
+    let failed = false;
+    for (const row of rows) {
+      let deletionError = "";
+      try {
+        const result = await fsSyncCommands.deleteSessionFolder(row.sessionId);
+        if (result.status === "error") {
+          deletionError = String(result.error);
+        }
+      } catch (error) {
+        deletionError = error instanceof Error ? error.message : String(error);
+      }
+
+      try {
+        if (deletionError) {
+          failed = true;
+          await execute(
+            `
+              UPDATE cloudsync_session_evictions
+              SET attempt_count = attempt_count + 1,
+                  last_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                  last_error = ?
+              WHERE session_id = ? AND workspace_id = ?
+            `,
+            [deletionError.slice(0, 512), row.sessionId, row.workspaceId],
+          );
+          continue;
+        }
+
+        await execute(
+          `
+            DELETE FROM cloudsync_session_evictions
+            WHERE session_id = ? AND workspace_id = ?
+              AND NOT EXISTS (
+                SELECT 1
+                FROM workspace_memberships
+                WHERE workspace_id = ? AND deleted_at IS NULL
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM sessions WHERE id = ?
+              )
+          `,
+          [row.sessionId, row.workspaceId, row.workspaceId, row.sessionId],
+        );
+      } catch (error) {
+        failed = true;
+        console.warn(
+          "[cloudsync] failed to update session eviction queue",
+          error,
+        );
+      }
+    }
+
+    if (failed) return true;
+    if (rows.length < batchSize) return false;
+  }
+}
+
+function scheduleCloudsyncSessionEvictionRetry(activeGeneration: number) {
+  if (evictionRetryTimer) {
+    clearTimeout(evictionRetryTimer);
+  }
+  evictionRetryTimer = setTimeout(() => {
+    evictionRetryTimer = null;
+    if (activeGeneration !== generation) return;
+
+    void enqueuePluginOperation(async () => {
+      if (activeGeneration !== generation) return;
+      const retry = await flushCloudsyncSessionEvictions();
+      if (retry && activeGeneration === generation) {
+        scheduleCloudsyncSessionEvictionRetry(activeGeneration);
+      }
+    });
+  }, EVICTION_RETRY_DELAY_MS);
 }
 
 export async function bindCloudsyncAccountForAuth(
@@ -108,7 +240,7 @@ function isCredentials(value: unknown): value is CloudsyncCredentials {
   }
 
   const candidate = value as Record<string, unknown>;
-  return (
+  const hasCoreCredentials =
     typeof candidate.databaseId === "string" &&
     candidate.databaseId.length > 0 &&
     typeof candidate.token === "string" &&
@@ -116,8 +248,86 @@ function isCredentials(value: unknown): value is CloudsyncCredentials {
     typeof candidate.expiresAt === "string" &&
     Number.isFinite(Date.parse(candidate.expiresAt)) &&
     typeof candidate.workspaceId === "string" &&
-    candidate.workspaceId.length > 0
+    candidate.workspaceId.length > 0;
+  if (!hasCoreCredentials) {
+    return false;
+  }
+
+  const projectionKeys = ["accountUserId", "personalWorkspaceId", "workspaces"];
+  if (!projectionKeys.some((key) => key in candidate)) {
+    return true;
+  }
+
+  if (
+    typeof candidate.accountUserId !== "string" ||
+    candidate.accountUserId.length === 0 ||
+    typeof candidate.personalWorkspaceId !== "string" ||
+    candidate.personalWorkspaceId.length === 0 ||
+    candidate.personalWorkspaceId !== candidate.workspaceId ||
+    candidate.accountUserId !== candidate.personalWorkspaceId ||
+    !Array.isArray(candidate.workspaces) ||
+    candidate.workspaces.length === 0
+  ) {
+    return false;
+  }
+
+  const workspaceIds = new Set<string>();
+  const membershipIds = new Set<string>();
+  for (const value of candidate.workspaces) {
+    if (!value || typeof value !== "object") {
+      return false;
+    }
+
+    const workspace = value as Record<string, unknown>;
+    if (
+      typeof workspace.id !== "string" ||
+      workspace.id.length === 0 ||
+      typeof workspace.ownerUserId !== "string" ||
+      workspace.ownerUserId.length === 0 ||
+      typeof workspace.kind !== "string" ||
+      !["personal", "shared"].includes(workspace.kind) ||
+      typeof workspace.name !== "string" ||
+      typeof workspace.membershipId !== "string" ||
+      workspace.membershipId.length === 0 ||
+      typeof workspace.role !== "string" ||
+      !["owner", "admin", "member"].includes(workspace.role) ||
+      typeof workspace.membershipCreatedAt !== "string" ||
+      !Number.isFinite(Date.parse(workspace.membershipCreatedAt)) ||
+      typeof workspace.membershipUpdatedAt !== "string" ||
+      !Number.isFinite(Date.parse(workspace.membershipUpdatedAt)) ||
+      typeof workspace.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(workspace.createdAt)) ||
+      typeof workspace.updatedAt !== "string" ||
+      !Number.isFinite(Date.parse(workspace.updatedAt)) ||
+      workspaceIds.has(workspace.id) ||
+      membershipIds.has(workspace.membershipId)
+    ) {
+      return false;
+    }
+
+    workspaceIds.add(workspace.id);
+    membershipIds.add(workspace.membershipId);
+  }
+
+  const personalWorkspaces = candidate.workspaces.filter(
+    (workspace) => workspace.kind === "personal",
   );
+  if (personalWorkspaces.length !== 1) {
+    return false;
+  }
+
+  const personalWorkspace = personalWorkspaces[0]!;
+  return (
+    personalWorkspace.id === candidate.personalWorkspaceId &&
+    personalWorkspace.ownerUserId === candidate.accountUserId &&
+    personalWorkspace.role === "owner"
+  );
+}
+
+function hasWorkspaceProjection(
+  credentials: CloudsyncCredentials,
+): credentials is ProjectedCloudsyncCredentials {
+  return credentials.accountUserId !== undefined;
 }
 
 function scheduleExchange(
@@ -311,7 +521,10 @@ async function activateCloudsync(
     return "ok";
   }
 
-  if (credentials.workspaceId !== session.user.id) {
+  const accountUserId = hasWorkspaceProjection(credentials)
+    ? credentials.accountUserId
+    : credentials.workspaceId;
+  if (accountUserId !== session.user.id) {
     if (!suspendBeforeExchange) {
       await suspendCloudsyncAfterCredentialRejection(activeGeneration);
     }
@@ -339,11 +552,29 @@ async function activateCloudsync(
         return "configured" as const;
       }
 
-      const configuration = await configureCloudsyncToken(
-        credentials.databaseId,
-        credentials.token,
-        credentials.workspaceId,
-      );
+      const configuration = hasWorkspaceProjection(credentials)
+        ? await configureCloudsyncToken(
+            credentials.databaseId,
+            credentials.token,
+            accountUserId,
+            {
+              accountUserId: credentials.accountUserId,
+              personalWorkspaceId: credentials.personalWorkspaceId,
+              workspaces: credentials.workspaces,
+            },
+          )
+        : await configureCloudsyncToken(
+            credentials.databaseId,
+            credentials.token,
+            accountUserId,
+          );
+
+      if (configuration === "configured" && activeGeneration === generation) {
+        const retryEvictions = await flushCloudsyncSessionEvictions();
+        if (retryEvictions) {
+          scheduleCloudsyncSessionEvictionRetry(activeGeneration);
+        }
+      }
 
       if (activeGeneration !== generation) {
         if (configuration === "configured") {

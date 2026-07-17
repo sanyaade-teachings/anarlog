@@ -114,7 +114,8 @@ pub(crate) async fn get_legacy_cleanup_status(
 pub(crate) async fn cleanup_legacy_files(
     state: tauri::State<'_, ManagedState>,
 ) -> Result<crate::LegacyCleanupResult, String> {
-    crate::import::cleanup_legacy_files(state.pool())
+    state
+        .cleanup_legacy_files()
         .await
         .map_err(|error| error.to_string())
 }
@@ -125,7 +126,8 @@ pub(crate) async fn run_legacy_import(
     state: tauri::State<'_, ManagedState>,
     dry_run: bool,
 ) -> Result<String, String> {
-    crate::import::rerun_legacy_import(state.pool(), dry_run)
+    state
+        .rerun_legacy_import(dry_run)
         .await
         .map_err(|error| error.to_string())
 }
@@ -179,9 +181,15 @@ pub(crate) async fn configure_cloudsync_token(
     database_id: String,
     token: String,
     workspace_id: String,
+    workspace_projection: Option<crate::CloudsyncWorkspaceProjection>,
 ) -> Result<crate::CloudsyncTokenConfigurationResult, String> {
     state
-        .configure_cloudsync_token(database_id, token, workspace_id)
+        .configure_cloudsync_token_with_projection(
+            database_id,
+            token,
+            workspace_id,
+            workspace_projection.map(Into::into),
+        )
         .await
         .map_err(|error| error.to_string())
 }
