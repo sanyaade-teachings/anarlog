@@ -3,6 +3,11 @@ import { uploadPrivateAttachment } from "@hypr/supabase/storage";
 import {
   AttachmentBackupGatewayError,
   createAttachmentBackupClient,
+  isAttachmentBackupDependencyAppeared,
+  isAttachmentBackupDeleteCancelled,
+  isAttachmentBackupDeleteTooLate,
+  type AttachmentBackupDeleteRequest,
+  type ScheduledAttachmentBackupDelete,
 } from "./client";
 import {
   attachmentTransferNative,
@@ -427,25 +432,62 @@ async function runDelete(
   const store = dependencies.store ?? attachmentTransferStore;
   const native = dependencies.native ?? attachmentTransferNative;
   const shouldDelete = await store.prepareDelete(job);
-  if (!shouldDelete) return;
-
   const guard = await native.prepareDeleteGuard(
     job.id,
     job.attemptCount,
+    shouldDelete,
     signal,
   );
+  const request = {
+    objectKey: job.objectKey,
+    attachmentRef: guard.attachmentRef,
+    versionRef: guard.versionRef,
+    deleteRequestId: job.id,
+  } satisfies AttachmentBackupDeleteRequest;
+
+  if (!shouldDelete) {
+    await dependencies.client.cancelDelete(request, signal);
+    await store.completeCancelledDelete(job);
+    return;
+  }
   if (!guard.shouldDelete) {
+    await dependencies.client.cancelDelete(request, signal);
     await store.deferDeleteForPreservation(job);
     return;
   }
 
-  await dependencies.client.delete(job.objectKey, signal);
+  try {
+    const scheduled = await dependencies.client.scheduleDelete(request, signal);
+    if (scheduled) validateScheduledDelete(scheduled, request);
+  } catch (error) {
+    if (isAttachmentBackupDeleteCancelled(error)) {
+      await store.completeCancelledDelete(job);
+      return;
+    }
+    if (!isAttachmentBackupDependencyAppeared(error)) throw error;
+  }
   await native.commitDeleteGuard(
     job.id,
     job.attemptCount,
     guard.guardId,
     signal,
   );
+}
+
+function validateScheduledDelete(
+  scheduled: ScheduledAttachmentBackupDelete,
+  request: AttachmentBackupDeleteRequest,
+) {
+  if (
+    scheduled.objectKey !== request.objectKey ||
+    scheduled.attachmentRef !== request.attachmentRef ||
+    scheduled.versionRef !== request.versionRef ||
+    scheduled.deleteRequestId !== request.deleteRequestId
+  ) {
+    throw new PermanentAttachmentTransferError(
+      "The delete lease referenced a different attachment backup.",
+    );
+  }
 }
 
 async function persistTransferFailure(
@@ -467,6 +509,7 @@ async function persistTransferFailure(
 function isPermanentFailure(error: unknown) {
   if (error instanceof PermanentAttachmentTransferError) return true;
   if (error instanceof AttachmentBackupGatewayError) {
+    if (isAttachmentBackupDeleteTooLate(error)) return true;
     return [400, 404, 507].includes(error.status);
   }
   if (error instanceof NativeAttachmentTransferError) {
