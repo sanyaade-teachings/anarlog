@@ -11,6 +11,8 @@ use hypr_e2ee::{RecoveryKey, WorkspaceKey};
 const SYNC_TIMEOUT: Duration = Duration::from_secs(90);
 const SYNC_ATTEMPTS: usize = 3;
 const POLICY_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+const REPLICA_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(90);
+const REPLICA_VISIBILITY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 fn cloudsync_config(auth: CloudsyncAuth, wait_ms: i64, max_retries: i64) -> CloudsyncRuntimeConfig {
     CloudsyncRuntimeConfig {
@@ -263,14 +265,9 @@ async fn setup_stale_record_client(
         "{operation} owner record was not downloaded"
     );
 
-    stop_db(&db, &format!("{operation} owner-authenticated client")).await;
-    db.cloudsync_configure(cloudsync_config(token_auth(attacker_token), 2_500, 1))
+    db.cloudsync_network_set_token(attacker_token)
         .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), db.cloudsync_start())
-        .await
-        .unwrap_or_else(|_| panic!("{operation} attacker-authenticated client start timed out"))
-        .unwrap();
+        .unwrap_or_else(|error| panic!("{operation} attacker reauthentication failed: {error}"));
     assert_eq!(
         db.cloudsync_status().await.unwrap().has_unsent_changes,
         Some(false),
@@ -399,12 +396,32 @@ async fn same_personal_workspace_syncs_and_decrypts_a_real_note() {
     db_b.cloudsync_network_reset_sync_version()
         .await
         .expect("second personal client snapshot reset failed");
-    sync_ok(&db_b, "second personal client download").await;
-    sync_ok(&db_b, "second personal client download retry").await;
-    let stats = apply_e2ee_replica_changes(db_b.pool(), &keys)
-        .await
-        .unwrap();
-    assert!(stats.applied_fields > 0);
+    tokio::time::timeout(REPLICA_VISIBILITY_TIMEOUT, async {
+        let mut attempt = 1;
+        loop {
+            sync_ok(
+                &db_b,
+                &format!("second personal client download attempt {attempt}"),
+            )
+            .await;
+            let stats = apply_e2ee_replica_changes(db_b.pool(), &keys)
+                .await
+                .expect("second personal client could not apply encrypted replica changes");
+            if stats.applied_fields > 0 {
+                break;
+            }
+
+            attempt += 1;
+            tokio::time::sleep(REPLICA_VISIBILITY_POLL_INTERVAL).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "second personal client did not receive encrypted fields within {} seconds",
+            REPLICA_VISIBILITY_TIMEOUT.as_secs()
+        )
+    });
 
     let downloaded_title: Option<String> =
         sqlx::query_scalar("SELECT title FROM sessions WHERE id = ? AND workspace_id = ?")

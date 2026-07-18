@@ -14,8 +14,20 @@ pub enum SyncError {
     #[error("Anarlog Pro is required for CloudSync")]
     ProPlanRequired,
 
+    #[error("A newer Anarlog version is required for encrypted CloudSync")]
+    CloudsyncUpgradeRequired,
+
     #[error("This account is protected by a different E2EE recovery key")]
     E2eeKeyMismatch,
+
+    #[error("E2EE freshness witness access is not permitted")]
+    E2eeWitnessForbidden,
+
+    #[error("E2EE freshness witness is not initialized")]
+    E2eeWitnessUninitialized,
+
+    #[error("E2EE freshness witness is unavailable")]
+    E2eeWitnessServiceUnavailable,
 
     #[error("Shared note publication is not permitted")]
     SnapshotPublicationForbidden,
@@ -87,10 +99,31 @@ impl IntoResponse for SyncError {
                 "subscription_required",
                 "Anarlog Pro is required for CloudSync".to_string(),
             ),
+            Self::CloudsyncUpgradeRequired => (
+                StatusCode::UPGRADE_REQUIRED,
+                "cloudsync_upgrade_required",
+                "Update Anarlog to continue using encrypted CloudSync".to_string(),
+            ),
             Self::E2eeKeyMismatch => (
                 StatusCode::CONFLICT,
                 "e2ee_key_mismatch",
                 "This account is protected by a different E2EE recovery key".to_string(),
+            ),
+            Self::E2eeWitnessForbidden => (
+                StatusCode::FORBIDDEN,
+                "e2ee_witness_forbidden",
+                "E2EE freshness witness access is not permitted".to_string(),
+            ),
+            Self::E2eeWitnessUninitialized => (
+                StatusCode::CONFLICT,
+                "e2ee_witness_uninitialized",
+                "Open an existing trusted device before setting up encrypted sync on this device"
+                    .to_string(),
+            ),
+            Self::E2eeWitnessServiceUnavailable => (
+                StatusCode::BAD_GATEWAY,
+                "e2ee_witness_unavailable",
+                "E2EE freshness witness is unavailable".to_string(),
             ),
             Self::SnapshotPublicationForbidden => (
                 StatusCode::FORBIDDEN,

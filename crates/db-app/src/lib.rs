@@ -138,6 +138,16 @@ pub const APP_MIGRATION_STEPS: &[hypr_db_migrate::MigrationStep] = &[
         sql: include_str!("../migrations/20260717140000_attachment_local_state.sql"),
     },
     hypr_db_migrate::MigrationStep {
+        id: "20260717192000_e2ee_replica_order",
+        scope: hypr_db_migrate::MigrationScope::Plain,
+        sql: include_str!("../migrations/20260717192000_e2ee_replica_order.sql"),
+    },
+    hypr_db_migrate::MigrationStep {
+        id: "20260717193000_e2ee_freshness_witness",
+        scope: hypr_db_migrate::MigrationScope::Plain,
+        sql: include_str!("../migrations/20260717193000_e2ee_freshness_witness.sql"),
+    },
+    hypr_db_migrate::MigrationStep {
         id: "20260717150000_attachment_transfer_jobs",
         scope: hypr_db_migrate::MigrationScope::Plain,
         sql: include_str!("../migrations/20260717150000_attachment_transfer_jobs.sql"),
@@ -375,8 +385,11 @@ mod tests {
                 "cloudsync_session_evictions",
                 "cloudsync_writable_workspaces",
                 "daily_notes",
+                "e2ee_local_device",
                 "e2ee_local_state",
                 "e2ee_records",
+                "e2ee_witness_records",
+                "e2ee_witness_state",
                 "entity_mentions",
                 "events",
                 "humans",
@@ -756,6 +769,103 @@ mod tests {
         assert!(!cloudsync_alter_guard_required("workspaces"));
         assert!(!cloudsync_alter_guard_required("workspace_memberships"));
         assert!(!cloudsync_alter_guard_required("calendars"));
+    }
+
+    #[tokio::test]
+    async fn e2ee_order_migration_backfills_the_canonical_payload_locally() {
+        let db = hypr_db_core::Db::connect_memory_plain().await.unwrap();
+        let payload = "ciphertext";
+        let payload_hash = hypr_e2ee::payload_hash(payload);
+        sqlx::raw_sql(include_str!(
+            "../migrations/20260717120000_e2ee_replica.sql"
+        ))
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO e2ee_records (id, workspace_id, payload)
+             VALUES ('record-1', 'workspace-a', ?)",
+        )
+        .bind(payload)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO e2ee_local_state (
+               record_id, workspace_id, table_name, row_id, field_name,
+               revision, value_tag, payload_hash
+             ) VALUES (
+               'record-1', 'workspace-a', 'sessions', 'session-1',
+               'title', 1, 'tag', ?
+             )",
+        )
+        .bind(&payload_hash)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO e2ee_local_state (
+               record_id, workspace_id, table_name, row_id, field_name,
+               revision, value_tag, payload_hash
+             ) VALUES (
+               'orphan-record', 'workspace-a', 'sessions', 'session-2',
+               'title', 1, 'tag', 'stale-hash'
+             )",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let migration = APP_MIGRATION_STEPS
+            .iter()
+            .find(|step| step.id == "20260717192000_e2ee_replica_order")
+            .unwrap();
+        assert_eq!(migration.scope, hypr_db_migrate::MigrationScope::Plain);
+        sqlx::raw_sql(migration.sql)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let state: (String, String, String) = sqlx::query_as(
+            "SELECT writer_id, payload, payload_hash
+             FROM e2ee_local_state
+             WHERE record_id = 'record-1'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(state, (String::new(), payload.to_string(), payload_hash));
+        let orphan_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM e2ee_local_state WHERE record_id = 'orphan-record'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(orphan_count, 0);
+        assert!(
+            !cloudsync_table_registry()
+                .iter()
+                .any(|table| table.table_name == "e2ee_local_device")
+        );
+        assert!(!cloudsync_alter_guard_required("e2ee_local_device"));
+    }
+
+    #[test]
+    fn e2ee_witness_state_is_local_only() {
+        let migration = APP_MIGRATION_STEPS
+            .iter()
+            .find(|step| step.id == "20260717193000_e2ee_freshness_witness")
+            .unwrap();
+
+        assert_eq!(migration.scope, hypr_db_migrate::MigrationScope::Plain);
+        for table_name in ["e2ee_witness_records", "e2ee_witness_state"] {
+            assert!(
+                !cloudsync_table_registry()
+                    .iter()
+                    .any(|table| table.table_name == table_name)
+            );
+            assert!(!cloudsync_alter_guard_required(table_name));
+        }
     }
 
     #[test]
