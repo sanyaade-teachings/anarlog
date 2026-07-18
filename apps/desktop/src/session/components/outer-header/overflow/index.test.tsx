@@ -17,6 +17,7 @@ const {
   uploadTranscriptMock,
   regenerateTranscriptMock,
   audioExists,
+  audioExistsResolved,
   currentNoteContent,
   exportModalMock,
   useHasTranscriptMock,
@@ -28,6 +29,7 @@ const {
   uploadTranscriptMock: vi.fn(),
   regenerateTranscriptMock: vi.fn(),
   audioExists: { value: false },
+  audioExistsResolved: { value: true },
   currentNoteContent: { value: "" },
   exportModalMock: vi.fn(
     (_props: { open: boolean; onOpenChange: (open: boolean) => void }) => null,
@@ -96,7 +98,10 @@ vi.mock("~/meeting-float/host", () => ({
 }));
 
 vi.mock("~/audio-player", () => ({
-  useAudioPlayer: () => ({ audioExists: audioExists.value }),
+  useAudioPlayer: () => ({
+    audioExists: audioExists.value,
+    audioExistsResolved: audioExistsResolved.value,
+  }),
 }));
 
 vi.mock("~/session/components/note-input/transcript/actions", () => ({
@@ -137,6 +142,7 @@ describe("OverflowButton", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     audioExists.value = false;
+    audioExistsResolved.value = true;
     currentNoteContent.value = "";
     useHasTranscriptMock.mockReturnValue(true);
     useConfigValueMock.mockReturnValue(false);
@@ -165,7 +171,7 @@ describe("OverflowButton", () => {
     expect(uploadTranscriptMock).toHaveBeenCalledTimes(1);
   });
 
-  it("hides upload actions when the session already has a transcript", () => {
+  it("offers audio upload for re-transcription when recording is missing", () => {
     render(
       <OverflowButton
         sessionId="session-1"
@@ -177,12 +183,77 @@ describe("OverflowButton", () => {
     expect(
       screen.queryByRole("button", { name: "Upload transcript" }),
     ).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Upload audio to re-transcribe" }),
+    );
     expect(
       screen.getByRole("button", { name: "Resume listening" }),
     ).not.toBeNull();
+    expect(uploadAudioMock).toHaveBeenCalledWith({
+      preserveSessionDate: true,
+    });
   });
 
+  it("hides replacement upload until the audio lookup succeeds", () => {
+    audioExistsResolved.value = false;
+
+    render(
+      <OverflowButton
+        sessionId="session-1"
+        currentView={{ type: "enhanced", id: "note-1" } as EditorView}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Upload audio to re-transcribe" }),
+    ).toBeNull();
+  });
+
+  it("hides initial upload actions until the audio lookup succeeds", () => {
+    audioExistsResolved.value = false;
+    useHasTranscriptMock.mockReturnValue(false);
+
+    render(
+      <OverflowButton
+        sessionId="session-1"
+        currentView={{ type: "enhanced", id: "note-1" } as EditorView}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Upload audio" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Upload transcript" }),
+    ).toBeNull();
+  });
+
+  it.each(["active", "finalizing", "running_batch"])(
+    "hides re-transcription actions while the session is %s",
+    (sessionMode) => {
+      useListenerMock.mockImplementation((selector) =>
+        selector({
+          getSessionMode: () => sessionMode,
+        }),
+      );
+
+      render(
+        <OverflowButton
+          sessionId="session-1"
+          currentView={{ type: "enhanced", id: "note-1" } as EditorView}
+        />,
+      );
+
+      expect(
+        screen.queryByRole("button", {
+          name: "Upload audio to re-transcribe",
+        }),
+      ).toBeNull();
+    },
+  );
+
   it("renders one separator when meeting actions are disabled", () => {
+    useHasTranscriptMock.mockReturnValue(false);
+    currentNoteContent.value = "Existing content";
+
     const { container } = render(
       <OverflowButton
         allowListening={false}

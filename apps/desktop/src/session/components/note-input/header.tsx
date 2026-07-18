@@ -34,7 +34,10 @@ import {
   formatTranscriptExportSegments,
 } from "~/session/components/note-input/transcript/export-data";
 import { useSessionTranscriptRenderData } from "~/session/components/note-input/transcript/render-request-hooks";
-import { useCanShowTranscript } from "~/session/components/shared";
+import {
+  useCanShowTranscript,
+  useHasTranscript,
+} from "~/session/components/shared";
 import { useEnsureDefaultSummary } from "~/session/hooks/useEnhancedNotes";
 import {
   deleteEnhancedNote,
@@ -51,6 +54,7 @@ import { createTaskId } from "~/store/zustand/ai-task/task-configs";
 import { type Tab, useTabs } from "~/store/zustand/tabs";
 import { type EditorView } from "~/store/zustand/tabs/schema";
 import { useListener } from "~/stt/contexts";
+import { useUploadFile } from "~/stt/useUploadFile";
 import {
   filterWebTemplatesAgainstUserTemplates,
   DEFAULT_TEMPLATE_ICON,
@@ -746,10 +750,17 @@ function HeaderViewTranscriptActive({
   };
 }) {
   const regenerate = useRegenerateTranscript(sessionId);
+  const { uploadAudio } = useUploadFile(sessionId);
   const { request: transcriptExportRequest } =
     useSessionTranscriptRenderData(sessionId);
-  const { audioExists, deleteRecording, isDeletingRecording } =
-    AudioPlayer.useAudioPlayer();
+  const {
+    audioExists,
+    audioExistsResolved,
+    deleteRecording,
+    isDeletingRecording,
+  } = AudioPlayer.useAudioPlayer();
+  const hasTranscript = useHasTranscript(sessionId);
+  const sessionMode = useListener((state) => state.getSessionMode(sessionId));
   const canCopyTranscript = Boolean(transcriptExportRequest);
   const handleCopyTranscript = useCallback(async () => {
     if (!transcriptExportRequest) {
@@ -789,14 +800,25 @@ function HeaderViewTranscriptActive({
       },
     ];
 
-    if (audioExists) {
+    if (
+      audioExistsResolved &&
+      sessionMode === "inactive" &&
+      (audioExists || hasTranscript)
+    ) {
       items.push({
         id: `regenerate-transcript-${sessionId}`,
-        text: "Re-transcribe",
+        text: audioExists ? "Re-transcribe" : "Upload audio to re-transcribe",
         action: () => {
-          void regenerate();
+          if (audioExists) {
+            void regenerate();
+          } else {
+            uploadAudio({ preserveSessionDate: true });
+          }
         },
       });
+    }
+
+    if (audioExists) {
       items.push({
         id: `delete-recording-${sessionId}`,
         text: "Delete recording",
@@ -808,12 +830,16 @@ function HeaderViewTranscriptActive({
     return items;
   }, [
     audioExists,
+    audioExistsResolved,
     canCopyTranscript,
     handleCopyTranscript,
     handleDeleteRecording,
+    hasTranscript,
     isDeletingRecording,
     regenerate,
+    sessionMode,
     sessionId,
+    uploadAudio,
   ]);
   const showContextMenu = useNativeContextMenu(contextMenu);
 
