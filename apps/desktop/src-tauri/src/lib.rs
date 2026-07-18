@@ -146,8 +146,14 @@ pub async fn main() {
             db.clone(),
             cloudsync_config,
         ))
-        .plugin(tauri_plugin_bedrock::init())
-        .plugin(tauri_plugin_importer::init())
+        .plugin(tauri_plugin_bedrock::init());
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.plugin(tauri_plugin_importer::init());
+    }
+
+    builder = builder
         .plugin(tauri_plugin_calendar::init())
         .plugin(tauri_plugin_todo::init())
         .plugin(tauri_plugin_auth::init())

@@ -14,7 +14,7 @@ let killedTestRunnerBackend = false;
 
 const defaultAppPath = path.resolve(
   import.meta.dirname,
-  "../../apps/desktop/src-tauri/target/release/hyprnote-dev",
+  "../../apps/desktop/src-tauri/target/release/anarlog-dev",
 );
 const appPath = process.env.APP_BINARY_PATH
   ? path.resolve(process.env.APP_BINARY_PATH)
@@ -101,19 +101,17 @@ export const config = {
 
     if (useXvfb) {
       console.log("Starting tauri-driver with xvfb-run (ONBOARDING=0)...");
-      tauriDriver = spawn("xvfb-run", ["-a", "pnpm", "exec", "tauri-driver"], {
+      tauriDriver = spawn("xvfb-run", ["-a", "tauri-driver"], {
         stdio: [null, process.stdout, process.stderr],
         env,
-        shell: true,
       });
     } else {
       console.log(
         `Starting tauri-driver on ${process.platform} (ONBOARDING=0)...`,
       );
-      tauriDriver = spawn("pnpm", ["exec", "tauri-driver"], {
+      tauriDriver = spawn("tauri-driver", [], {
         stdio: [null, process.stdout, process.stderr],
         env,
-        shell: true,
       });
     }
 
