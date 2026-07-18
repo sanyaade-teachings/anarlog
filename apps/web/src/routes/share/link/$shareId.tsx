@@ -6,11 +6,11 @@ import { useShareRouteContinuation } from "@/components/share-route-continuation
 import { LinkSharedNoteActions } from "@/components/shared-note-actions";
 import { SharedNoteCollaboration } from "@/components/shared-note-collaboration";
 import type { SharedAttachmentResolver } from "@/components/shared-note-document";
+import { SharedNoteEditableViewer } from "@/components/shared-note-editable-viewer";
 import {
   SharedNoteLoading,
   SharedNoteTransientError,
   SharedNoteUnavailable,
-  SharedNoteViewer,
 } from "@/components/shared-note-viewer";
 import { fetchUser } from "@/functions/auth";
 import {
@@ -30,7 +30,10 @@ import {
   getPrivateShareHead,
   privateShareHeaders,
 } from "@/lib/shared-note-meta";
-import { getLinkSharedNoteRouteGate } from "@/lib/shared-note-route-state";
+import {
+  getLinkSharedNoteFallbackSnapshot,
+  getLinkSharedNoteRouteGate,
+} from "@/lib/shared-note-route-state";
 import {
   buildSharedNoteWebPath,
   sharedNoteDesktopSchemeSchema,
@@ -103,14 +106,15 @@ function LinkSharedNoteClient({
       ? authenticatedQuery.data.note
       : null;
   const resolveAttachment = useCallback<SharedAttachmentResolver>(
-    (attachment, signal) => {
+    async (attachment, signal) => {
       if (authenticatedNote) {
-        return createAuthenticatedSharedAttachmentDownload({
+        const download = await createAuthenticatedSharedAttachmentDownload({
           data: {
             shareId: authenticatedNote.snapshot.shareId,
             attachmentId: attachment.id,
           },
         });
+        if (download) return download;
       }
       return continuation.token
         ? fetchLinkSharedAttachmentDownload(
@@ -169,11 +173,28 @@ function LinkSharedNoteClient({
   if (!snapshot) {
     return <SharedNoteUnavailable />;
   }
+  const fallbackSnapshot = getLinkSharedNoteFallbackSnapshot({
+    authenticatedSnapshot: authenticatedNote?.snapshot ?? null,
+    linkSnapshot,
+  });
 
   return (
-    <SharedNoteViewer
+    <SharedNoteEditableViewer
+      key={snapshot.shareId}
       snapshot={snapshot}
+      authenticatedNote={authenticatedNote}
+      fallbackAccessLabel={
+        linkSnapshot
+          ? "Anyone with the link · View only"
+          : "Shared note · View only"
+      }
+      fallbackSnapshot={fallbackSnapshot}
+      onAccessChanged={() => {
+        void authenticatedQuery.refetch();
+        if (hasToken) void snapshotQuery.refetch();
+      }}
       resolveAttachment={resolveAttachment}
+      revokedBehavior="read-only"
       accessLabel={
         authenticatedNote &&
         shouldUseAuthenticatedSharedNoteAccessLabel(authenticatedNote)
