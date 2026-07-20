@@ -51,28 +51,37 @@ export async function getProviderConnections(): Promise<
   ProviderConnectionIds[]
 > {
   const result = await calendarCommands.listConnectionIds();
-  if (result.status === "error") return [];
+  if (result.status === "error") {
+    throw new Error(`Failed to discover calendar connections: ${result.error}`);
+  }
   return result.data;
 }
 
 export async function syncCalendars(
   providerConnections: ProviderConnectionIds[],
+  signal?: AbortSignal,
 ): Promise<void> {
   for (const { provider, connection_ids } of providerConnections) {
+    if (signal?.aborted) return;
+
     const successfulConnections: Array<{
       connectionId: string;
       calendars: CalendarListItem[];
     }> = [];
 
     for (const connectionId of connection_ids) {
+      if (signal?.aborted) return;
+
       const result = await calendarCommands.listCalendars(
         provider,
         connectionId,
       );
+      if (signal?.aborted) return;
       if (result.status === "error") continue;
       successfulConnections.push({ connectionId, calendars: result.data });
     }
 
+    if (signal?.aborted) return;
     await applyCalendarInventory({
       provider,
       requestedConnectionIds: connection_ids,
