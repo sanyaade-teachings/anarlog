@@ -56,7 +56,7 @@ export function SharedNoteViewer({
 
   return (
     <SharedNoteShell>
-      <article className="surface border-color-subtle overflow-hidden rounded-3xl border shadow-sm">
+      <article className="surface border-color-subtle overflow-hidden rounded-3xl border shadow-sm xl:overflow-visible">
         <header className="border-color-subtle border-b px-6 py-7 sm:px-10 sm:py-10">
           <div className="flex items-start justify-between gap-4">
             <div className="text-color-muted flex min-w-0 flex-wrap items-center gap-2 text-sm">
@@ -191,8 +191,18 @@ export function SharedNotePrompt({
 
 function SharedNoteShell({ children }: { children: React.ReactNode }) {
   return (
-    <main className="bg-page text-color min-h-screen px-4 py-5 sm:px-6 sm:py-8">
-      <div className="mx-auto w-full max-w-[760px]">
+    <main className="bg-page text-color min-h-screen overflow-x-clip px-4 py-5 sm:px-6 sm:py-8">
+      <div
+        className={cn([
+          "mx-auto w-full max-w-[760px]",
+          // When an anchored comment rail is mounted ([data-comment-rail]),
+          // right padding reserves its width while keeping a 760px content
+          // box, so the rail renders inside the shell instead of being
+          // clipped by overflow-x-clip. Static fallbacks render no rail and
+          // keep the centered column.
+          "xl:has-[[data-comment-rail]]:max-w-[1104px] xl:has-[[data-comment-rail]]:pr-[344px]",
+        ])}
+      >
         <header className="mb-8 flex items-center justify-between gap-4 px-1">
           <a href="/" aria-label="Anarlog home">
             <AnarlogLogo className="h-8 w-auto" />
