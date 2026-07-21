@@ -35,6 +35,7 @@ export function ComposerScreen() {
   const { handleSendMessage } = useChatActions({
     groupId: chat.groupId,
     onGroupCreated: chat.setGroupId,
+    onGroupCreateFailed: chat.rollbackFailedGroup,
   });
 
   useEffect(() => {

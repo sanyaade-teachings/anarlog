@@ -15,6 +15,11 @@ import {
   useChatContextPipeline,
 } from "~/chat/context/use-chat-context-pipeline";
 import {
+  hasPendingChatPersist,
+  isFailedChatGroupCreate,
+  waitForPendingChatPersists,
+} from "~/chat/store/pending-persists";
+import {
   buildPersistedChatMessage,
   getVisibleChatMessages,
   shouldPersistFinishedMessage,
@@ -167,8 +172,17 @@ export function ChatSession({
           }
 
           void (async () => {
+            // Outbound user writes may still be retrying; settle them first
+            // so the lookup below reflects the final truth and a failed
+            // persist can be repaired instead of orphaning the reply.
+            const awaitedChatGroupId =
+              submittedChatGroupId ?? latestChatGroupIdRef.current;
+            if (awaitedChatGroupId) {
+              await waitForPendingChatPersists(awaitedChatGroupId);
+            }
+
             let persistedChatGroupId: string | null = null;
-            if (!submittedChatGroupId && submittedUserMessage) {
+            if (submittedUserMessage) {
               try {
                 persistedChatGroupId = await getChatMessageGroupId(
                   submittedUserMessage.id,
@@ -186,6 +200,26 @@ export function ChatSession({
               latestChatGroupIdRef.current;
             if (!targetChatGroupId) {
               return;
+            }
+
+            // The group row was never created; persisting into it would
+            // produce orphaned rows that never appear in history.
+            if (isFailedChatGroupCreate(targetChatGroupId)) {
+              return;
+            }
+
+            // If the outbound persist failed, the assistant row would land
+            // with no matching user row and reconciliation would wipe the
+            // turn — repair the user message before persisting the reply.
+            if (submittedUserMessage && !persistedChatGroupId) {
+              await upsertChatMessage(
+                buildPersistedChatMessage({
+                  message: submittedUserMessage,
+                  chatGroupId: targetChatGroupId,
+                  ownerUserId: currentUserId,
+                  status: "ready",
+                }),
+              );
             }
 
             const sanitizedParts = stripEphemeralToolContext(message.parts);
@@ -228,6 +262,10 @@ export function ChatSession({
     if (
       status !== "ready" ||
       !chatGroupId ||
+      // An outbound send's write (with retries) may still be in flight; the
+      // persisted set is legitimately behind it and reconciling now would
+      // wipe the turn the user just sent.
+      hasPendingChatPersist(chatGroupId) ||
       areMessagesEqual(messages, persistedVisibleMessages)
     ) {
       return;
