@@ -116,8 +116,19 @@ export function BillingProvider({ children }: { children: ReactNode }) {
     ],
   );
 
+  const [isUpgradingToPro, setIsUpgradingToPro] = useState(false);
+  // State alone cannot gate re-entry: a second click can land before the
+  // disabled state renders, and its finally would re-enable the buttons
+  // while the first open is still in flight.
+  const upgradeInFlightRef = useRef(false);
+
   const openUpgrade = useCallback(
     async (source: "feature_gate" | "trial_ended") => {
+      if (upgradeInFlightRef.current) {
+        return;
+      }
+      upgradeInFlightRef.current = true;
+
       void analyticsCommands.event({
         event: "upgrade_clicked",
         plan: "pro",
@@ -125,13 +136,19 @@ export function BillingProvider({ children }: { children: ReactNode }) {
         source,
       });
 
-      const url = await buildWebAppUrl("/app/checkout", {
-        period: "monthly",
-        source,
-      });
-      await openUrlWithInstruction(url, "billing", (u) =>
-        openerCommands.openUrl(u, null),
-      );
+      setIsUpgradingToPro(true);
+      try {
+        const url = await buildWebAppUrl("/app/checkout", {
+          period: "monthly",
+          source,
+        });
+        await openUrlWithInstruction(url, "billing", (u) =>
+          openerCommands.openUrl(u, null),
+        );
+      } finally {
+        upgradeInFlightRef.current = false;
+        setIsUpgradingToPro(false);
+      }
     },
     [],
   );
@@ -274,8 +291,9 @@ export function BillingProvider({ children }: { children: ReactNode }) {
       isReady,
       canStartTrial,
       upgradeToPro,
+      isUpgradingToPro,
     }),
-    [billing, isReady, canStartTrial, upgradeToPro],
+    [billing, isReady, canStartTrial, upgradeToPro, isUpgradingToPro],
   );
 
   return (

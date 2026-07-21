@@ -1133,6 +1133,9 @@ function SessionSharePopoverContent({
     },
   });
 
+  // Optimistic General-access value: shown from click until the refreshed
+  // management state confirms it, so the select never flashes the old scope.
+  const [optimisticScope, setOptimisticScope] = useState<string | null>(null);
   const scopeMutation = useMutation({
     mutationFn: (target: string) =>
       runOperation(async (signal) => {
@@ -1209,9 +1212,13 @@ function SessionSharePopoverContent({
       sonnerToast.success(copied ? "Share link copied." : "Access updated.");
     },
     onError: () => {
+      setOptimisticScope(null);
       sonnerToast.error("Could not update general access.");
     },
-    onSettled: onChanged,
+    onSettled: async () => {
+      await onChanged();
+      setOptimisticScope(null);
+    },
   });
 
   const entryMutation = useMutation({
@@ -1415,6 +1422,9 @@ function SessionSharePopoverContent({
       ? `workspace:${management.generalWorkspaceId}`
       : management.generalScope
     : "restricted";
+  // The action buttons must track the same scope the select displays, so an
+  // optimistic scope switches them together instead of leaving a stale button.
+  const shownScopeValue = optimisticScope ?? generalScopeValue;
 
   return (
     <PopoverContent
@@ -1702,14 +1712,23 @@ function SessionSharePopoverContent({
                   </h3>
                   <div className="mt-3 flex items-center gap-2">
                     <Select
-                      value={generalScopeValue}
+                      value={shownScopeValue}
                       disabled={scopeMutation.isPending}
-                      onValueChange={scopeMutation.mutate}
+                      onValueChange={(value) => {
+                        setOptimisticScope(value);
+                        scopeMutation.mutate(value);
+                      }}
                     >
                       <SelectTrigger
                         aria-label="General access"
                         className="h-8 min-w-0 flex-1 rounded-full text-xs"
                       >
+                        {scopeMutation.isPending ? (
+                          <Loader2Icon
+                            className="size-3.5 shrink-0 animate-spin"
+                            aria-hidden="true"
+                          />
+                        ) : null}
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -1731,7 +1750,7 @@ function SessionSharePopoverContent({
                         </SelectItem>
                       </SelectContent>
                     </Select>
-                    {management.generalScope === "link" ? (
+                    {shownScopeValue === "link" ? (
                       <Button
                         type="button"
                         size="sm"
@@ -1740,14 +1759,21 @@ function SessionSharePopoverContent({
                         onClick={() => scopeMutation.mutate("link")}
                         className="shrink-0"
                       >
-                        <RefreshCwIcon
-                          className="size-3.5"
-                          aria-hidden="true"
-                        />
+                        {scopeMutation.isPending ? (
+                          <Loader2Icon
+                            className="size-3.5 animate-spin"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <RefreshCwIcon
+                            className="size-3.5"
+                            aria-hidden="true"
+                          />
+                        )}
                         <Trans>Replace link & copy</Trans>
                       </Button>
-                    ) : management.generalScope === "public" ||
-                      management.generalScope === "workspace" ? (
+                    ) : shownScopeValue === "public" ||
+                      shownScopeValue.startsWith("workspace:") ? (
                       <Button
                         type="button"
                         size="sm"
@@ -1756,7 +1782,14 @@ function SessionSharePopoverContent({
                         onClick={() => generalCopyMutation.mutate()}
                         className="shrink-0"
                       >
-                        <CopyIcon className="size-3.5" aria-hidden="true" />
+                        {generalCopyMutation.isPending ? (
+                          <Loader2Icon
+                            className="size-3.5 animate-spin"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <CopyIcon className="size-3.5" aria-hidden="true" />
+                        )}
                         <Trans>Copy link</Trans>
                       </Button>
                     ) : null}

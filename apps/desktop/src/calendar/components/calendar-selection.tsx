@@ -6,7 +6,7 @@ import {
   Loader2Icon,
   RefreshCwIcon,
 } from "lucide-react";
-import { type MouseEvent } from "react";
+import { type MouseEvent, useRef, useState } from "react";
 
 import { cn } from "@hypr/utils";
 
@@ -31,7 +31,10 @@ export interface CalendarGroup {
 
 interface CalendarSelectionProps {
   groups: CalendarGroup[];
-  onToggle: (calendar: CalendarItem, enabled: boolean) => void;
+  onToggle: (
+    calendar: CalendarItem,
+    enabled: boolean,
+  ) => void | Promise<unknown>;
   onRefresh?: () => void;
   className?: string;
   isLoading?: boolean;
@@ -181,14 +184,33 @@ function CalendarToggleRow({
 }: {
   calendar: CalendarItem;
   enabled: boolean;
-  onToggle: (enabled: boolean) => void;
+  onToggle: (enabled: boolean) => void | Promise<unknown>;
 }) {
   const color = calendar.color ?? "#888";
+
+  // Optimistic check state: the write goes through the DB queue and the
+  // enabled prop only flips after the live query re-emits. The sequence
+  // number keeps a stale rejection from reverting a newer toggle.
+  const [pending, setPending] = useState<boolean | null>(null);
+  const toggleSeqRef = useRef(0);
+  if (pending !== null && pending === enabled) {
+    setPending(null);
+  }
+  const shownEnabled = pending ?? enabled;
 
   return (
     <button
       type="button"
-      onClick={() => onToggle(!enabled)}
+      onClick={() => {
+        const next = !shownEnabled;
+        const seq = ++toggleSeqRef.current;
+        setPending(next);
+        void Promise.resolve(onToggle(next)).catch(() => {
+          if (toggleSeqRef.current === seq) {
+            setPending(null);
+          }
+        });
+      }}
       className="flex w-full items-center gap-2 py-1 pr-2 pl-0 text-left"
     >
       <div
@@ -197,12 +219,12 @@ function CalendarToggleRow({
           "transition-colors duration-100",
         ])}
         style={
-          enabled
+          shownEnabled
             ? { backgroundColor: color, borderColor: color }
             : { borderColor: color }
         }
       >
-        {enabled && (
+        {shownEnabled && (
           <CheckIcon
             className="text-primary-foreground size-3"
             strokeWidth={3}
