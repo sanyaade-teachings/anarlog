@@ -98,6 +98,7 @@ import {
   upsertDurableSharedNoteCache,
   useDurableSharedNote,
 } from "~/shared-notes/cache";
+import { useMountEffect } from "~/shared/hooks/useMountEffect";
 import { getScheme } from "~/shared/utils";
 
 type SharePanelData = {
@@ -105,8 +106,12 @@ type SharePanelData = {
   access: SessionShareAccessEntry[];
 };
 
-type SharePanelIdentity = {
+type SharePreparationIdentity = {
   ownerUserId: string;
+  sessionId: string;
+};
+
+type SharePanelIdentity = SharePreparationIdentity & {
   shareId: string;
 };
 
@@ -166,6 +171,13 @@ const capabilityRanks: Record<SessionAccessCapability, number> = {
   editor: 3,
 };
 
+class SharePreparationAbortedError extends ShareManagementError {
+  constructor() {
+    super();
+    this.name = "SharePreparationAbortedError";
+  }
+}
+
 export function sessionShareManagementQueryKey(
   ownerUserId: string,
   shareId: string,
@@ -177,6 +189,8 @@ export function SessionShareButton({ sessionId }: { sessionId: string }) {
   const auth = useAuth();
   const latestAuthRef = useRef(auth);
   latestAuthRef.current = auth;
+  const latestSessionIdRef = useRef(sessionId);
+  latestSessionIdRef.current = sessionId;
   const prepareControllersRef = useRef(new Set<AbortController>());
   const shareButtonLifecycleRef = useCallback(
     (node: HTMLButtonElement | null) => {
@@ -195,17 +209,25 @@ export function SessionShareButton({ sessionId }: { sessionId: string }) {
     prepareControllersRef.current.add(controller);
     try {
       return await operation(controller.signal);
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new SharePreparationAbortedError();
+      }
+      throw error;
     } finally {
       prepareControllersRef.current.delete(controller);
     }
   };
   const requireActivePrepareContext = (
-    ownerUserId: string,
+    identity: SharePreparationIdentity,
     signal: AbortSignal,
   ) => {
     if (signal.aborted) throw new ShareManagementError();
     const context = requireManagementContext(latestAuthRef.current);
-    if (context.session.user.id !== ownerUserId) {
+    if (
+      context.session.user.id !== identity.ownerUserId ||
+      latestSessionIdRef.current !== identity.sessionId
+    ) {
       throw new ShareManagementError();
     }
     return { ...context, signal };
@@ -214,17 +236,63 @@ export function SessionShareButton({ sessionId }: { sessionId: string }) {
   const queryClient = useQueryClient();
   const [sharePanelIdentity, setSharePanelIdentity] =
     useState<SharePanelIdentity | null>(null);
-  const [upgradePromptOpen, setUpgradePromptOpen] = useState(false);
+  const [sharePreparationIdentity, setSharePreparationIdentity] =
+    useState<SharePreparationIdentity | null>(null);
+  const [waitingForBilling, setWaitingForBilling] = useState(false);
+  const [upgradePromptIdentity, setUpgradePromptIdentity] =
+    useState<SharePreparationIdentity | null>(null);
   const sharePanelPendingRef = useRef(false);
+  const clearAbandonedSharePreparation = (
+    identity: SharePreparationIdentity,
+  ) => {
+    setSharePreparationIdentity((current) =>
+      current &&
+      current.ownerUserId === identity.ownerUserId &&
+      current.sessionId === identity.sessionId
+        ? null
+        : current,
+    );
+  };
   const accountUserId = auth.session?.user.id ?? null;
+  // Drop abandoned preparation state the moment the account or note stops
+  // matching, so returning to the original identity cannot auto-resume a
+  // publish the user never re-requested.
+  if (
+    sharePreparationIdentity &&
+    (sharePreparationIdentity.ownerUserId !== accountUserId ||
+      sharePreparationIdentity.sessionId !== sessionId)
+  ) {
+    setSharePreparationIdentity(null);
+    setWaitingForBilling(false);
+  }
+  if (
+    upgradePromptIdentity &&
+    (upgradePromptIdentity.ownerUserId !== accountUserId ||
+      upgradePromptIdentity.sessionId !== sessionId)
+  ) {
+    setUpgradePromptIdentity(null);
+  }
   const activeSharePanelIdentity =
-    sharePanelIdentity?.ownerUserId === accountUserId
+    sharePanelIdentity?.ownerUserId === accountUserId &&
+    sharePanelIdentity.sessionId === sessionId
       ? sharePanelIdentity
       : null;
+  const activeSharePreparationIdentity =
+    sharePreparationIdentity?.ownerUserId === accountUserId &&
+    sharePreparationIdentity.sessionId === sessionId
+      ? sharePreparationIdentity
+      : null;
+  const activeUpgradePromptIdentity =
+    upgradePromptIdentity?.ownerUserId === accountUserId &&
+    upgradePromptIdentity.sessionId === sessionId
+      ? upgradePromptIdentity
+      : null;
   const showUpgradePrompt =
-    upgradePromptOpen && billing.isReady && !billing.isPaid;
+    Boolean(activeUpgradePromptIdentity) && billing.isReady && !billing.isPaid;
   const sharePopoverOpen =
-    showUpgradePrompt || Boolean(activeSharePanelIdentity);
+    showUpgradePrompt ||
+    Boolean(activeSharePanelIdentity) ||
+    Boolean(activeSharePreparationIdentity);
   const durableNoteQuery = useDurableSharedNote(
     accountUserId,
     activeSharePanelIdentity?.shareId ?? "",
@@ -234,22 +302,28 @@ export function SessionShareButton({ sessionId }: { sessionId: string }) {
   const initializeMutation = useMutation({
     mutationFn: ({
       publish,
-      ownerUserId,
+      identity,
     }: {
       publish: boolean;
-      ownerUserId: string;
+      identity: SharePreparationIdentity;
     }) =>
       runPrepareOperation(async (signal) => {
-        let context = requireActivePrepareContext(ownerUserId, signal);
-        await flushCanonicalSessionEditorChanges(sessionId);
-        context = requireActivePrepareContext(ownerUserId, signal);
-        const source = await loadSessionShareSource(sessionId, ownerUserId);
-        context = requireActivePrepareContext(ownerUserId, signal);
+        let context = requireActivePrepareContext(identity, signal);
+        await flushCanonicalSessionEditorChanges(identity.sessionId);
+        context = requireActivePrepareContext(identity, signal);
+        const source = await loadSessionShareSource(
+          identity.sessionId,
+          identity.ownerUserId,
+        );
+        context = requireActivePrepareContext(identity, signal);
+        if (source.sessionId !== identity.sessionId) {
+          throw new ShareManagementError();
+        }
         const share = await createOrReuseSessionShare(context, {
           workspaceId: source.workspaceId,
           sessionId: source.sessionId,
         });
-        context = requireActivePrepareContext(ownerUserId, signal);
+        context = requireActivePrepareContext(identity, signal);
         const management = await getSessionShareManagement(
           context,
           share.shareId,
@@ -261,9 +335,12 @@ export function SessionShareButton({ sessionId }: { sessionId: string }) {
           throw new ShareManagementError();
         }
         const cachedManagedShare = publish
-          ? await loadManagedSharedNoteForSession(ownerUserId, source.sessionId)
+          ? await loadManagedSharedNoteForSession(
+              identity.ownerUserId,
+              source.sessionId,
+            )
           : null;
-        context = requireActivePrepareContext(ownerUserId, signal);
+        context = requireActivePrepareContext(identity, signal);
         if (
           cachedManagedShare &&
           (cachedManagedShare.shareId !== share.shareId ||
@@ -293,15 +370,15 @@ export function SessionShareButton({ sessionId }: { sessionId: string }) {
             attachmentIds: [],
             signal,
           });
-          context = requireActivePrepareContext(ownerUserId, signal);
+          context = requireActivePrepareContext(identity, signal);
           await recordPublishedSessionShareState({
-            viewerUserId: ownerUserId,
+            viewerUserId: identity.ownerUserId,
             shareId: published.shareId,
             sessionId: source.sessionId,
             contentRevision: published.contentRevision,
             sourceHash,
           });
-          await upsertDurableSharedNoteCache(ownerUserId, {
+          await upsertDurableSharedNoteCache(identity.ownerUserId, {
             shareId: published.shareId,
             workspaceId: source.workspaceId,
             sessionId: source.sessionId,
@@ -317,17 +394,21 @@ export function SessionShareButton({ sessionId }: { sessionId: string }) {
             webEditBase: null,
             publishedAt: published.publishedAt,
           });
-          context = requireActivePrepareContext(ownerUserId, signal);
+          context = requireActivePrepareContext(identity, signal);
         }
         const access = await listSessionShareAccess(context, share.shareId);
-        requireActivePrepareContext(ownerUserId, signal);
+        requireActivePrepareContext(identity, signal);
         return {
-          identity: { ownerUserId, shareId: share.shareId },
+          identity: { ...identity, shareId: share.shareId },
           data: { management, access },
         };
       }),
     onSuccess: ({ identity, data }) => {
-      if (latestAuthRef.current.session?.user.id !== identity.ownerUserId) {
+      if (
+        latestAuthRef.current.session?.user.id !== identity.ownerUserId ||
+        latestSessionIdRef.current !== identity.sessionId
+      ) {
+        clearAbandonedSharePreparation(identity);
         return;
       }
       queryClient.setQueryData(
@@ -337,10 +418,17 @@ export function SessionShareButton({ sessionId }: { sessionId: string }) {
       void queryClient.invalidateQueries({
         queryKey: ["durable-shared-note-cache", identity.ownerUserId],
       });
+      setSharePreparationIdentity(null);
       setSharePanelIdentity(identity);
     },
     onError: (error, variables) => {
-      if (latestAuthRef.current.session?.user.id !== variables.ownerUserId) {
+      if (
+        error instanceof SharePreparationAbortedError ||
+        latestAuthRef.current.session?.user.id !==
+          variables.identity.ownerUserId ||
+        latestSessionIdRef.current !== variables.identity.sessionId
+      ) {
+        clearAbandonedSharePreparation(variables.identity);
         return;
       }
       console.error("[session-sharing] could not prepare note", error);
@@ -348,17 +436,31 @@ export function SessionShareButton({ sessionId }: { sessionId: string }) {
     },
   });
   const freeShareMutation = useMutation({
-    mutationFn: (ownerUserId: string) =>
-      loadManagedSharedNoteForSession(ownerUserId, sessionId),
-    onSuccess: (managedShare, ownerUserId) => {
-      if (latestAuthRef.current.session?.user.id !== ownerUserId) return;
-      if (!managedShare) {
-        setUpgradePromptOpen(true);
+    mutationFn: (identity: SharePreparationIdentity) =>
+      loadManagedSharedNoteForSession(identity.ownerUserId, identity.sessionId),
+    onSuccess: (managedShare, identity) => {
+      if (
+        latestAuthRef.current.session?.user.id !== identity.ownerUserId ||
+        latestSessionIdRef.current !== identity.sessionId
+      ) {
+        clearAbandonedSharePreparation(identity);
         return;
       }
-      initializeMutation.mutate({ publish: false, ownerUserId });
+      if (!managedShare) {
+        setSharePreparationIdentity(null);
+        setUpgradePromptIdentity(identity);
+        return;
+      }
+      initializeMutation.mutate({ publish: false, identity });
     },
-    onError: () => {
+    onError: (_error, identity) => {
+      if (
+        latestAuthRef.current.session?.user.id !== identity.ownerUserId ||
+        latestSessionIdRef.current !== identity.sessionId
+      ) {
+        clearAbandonedSharePreparation(identity);
+        return;
+      }
       sonnerToast.error("Could not check this note's sharing status.");
     },
   });
@@ -390,28 +492,52 @@ export function SessionShareButton({ sessionId }: { sessionId: string }) {
     durableNoteQuery.data,
   );
 
+  const closeSharePopover = () => {
+    setSharePanelIdentity(null);
+    setSharePreparationIdentity(null);
+    setWaitingForBilling(false);
+    setUpgradePromptIdentity(null);
+    initializeMutation.reset();
+    freeShareMutation.reset();
+  };
+
+  const runSharePreparation = (identity: SharePreparationIdentity) => {
+    setWaitingForBilling(false);
+    if (!billing.isPaid) {
+      freeShareMutation.mutate(identity);
+      return;
+    }
+    initializeMutation.mutate({ publish: true, identity });
+  };
+
+  const startSharePreparation = (identity: SharePreparationIdentity) => {
+    initializeMutation.reset();
+    freeShareMutation.reset();
+    setSharePreparationIdentity(identity);
+    if (!billing.isReady) {
+      setWaitingForBilling(true);
+      return;
+    }
+    runSharePreparation(identity);
+  };
+
   const handleShare = () => {
     if (sharePopoverOpen) {
-      if (!sharePanelPendingRef.current) {
-        setSharePanelIdentity(null);
-        setUpgradePromptOpen(false);
+      if (!shareButtonPending && !sharePanelPendingRef.current) {
+        closeSharePopover();
       }
       return;
     }
-    if (!billing.isReady || shareButtonPending) return;
     if (!auth.session || auth.session.user.is_anonymous === true) {
       void auth.signIn().catch(() => {
         sonnerToast.error("Could not start sign-in.");
       });
       return;
     }
-    if (!billing.isPaid) {
-      freeShareMutation.mutate(auth.session.user.id);
-      return;
-    }
-    initializeMutation.mutate({
-      publish: true,
+    if (shareButtonPending) return;
+    startSharePreparation({
       ownerUserId: auth.session.user.id,
+      sessionId,
     });
   };
 
@@ -419,9 +545,8 @@ export function SessionShareButton({ sessionId }: { sessionId: string }) {
     <Popover
       open={sharePopoverOpen}
       onOpenChange={(open) => {
-        if (!open && !sharePanelPendingRef.current) {
-          setSharePanelIdentity(null);
-          setUpgradePromptOpen(false);
+        if (!open && !shareButtonPending && !sharePanelPendingRef.current) {
+          closeSharePopover();
         }
       }}
     >
@@ -453,8 +578,8 @@ export function SessionShareButton({ sessionId }: { sessionId: string }) {
         <SessionShareUpgradeContent onUpgrade={billing.upgradeToPro} />
       ) : activeSharePanelIdentity ? (
         <SessionSharePopoverContent
-          key={`${activeSharePanelIdentity.ownerUserId}:${activeSharePanelIdentity.shareId}:${sessionId}`}
-          sessionId={sessionId}
+          key={`${activeSharePanelIdentity.ownerUserId}:${activeSharePanelIdentity.shareId}:${activeSharePanelIdentity.sessionId}`}
+          sessionId={activeSharePanelIdentity.sessionId}
           identity={activeSharePanelIdentity}
           data={shareQuery.data}
           loading={shareQuery.isPending}
@@ -466,7 +591,7 @@ export function SessionShareButton({ sessionId }: { sessionId: string }) {
           sharedAttachmentsReady={sharedAttachmentsReady}
           pendingRef={sharePanelPendingRef}
           onRetry={() => void shareQuery.refetch()}
-          onClose={() => setSharePanelIdentity(null)}
+          onClose={closeSharePopover}
           onChanged={() =>
             Promise.all([
               queryClient.invalidateQueries({ queryKey }),
@@ -479,8 +604,120 @@ export function SessionShareButton({ sessionId }: { sessionId: string }) {
             ])
           }
         />
+      ) : activeSharePreparationIdentity ? (
+        <>
+          {waitingForBilling && billing.isReady ? (
+            <SharePreparationStarter
+              identity={activeSharePreparationIdentity}
+              onStart={runSharePreparation}
+            />
+          ) : null}
+          <SessionSharePreparationContent
+            loading={shareButtonPending}
+            error={initializeMutation.isError || freeShareMutation.isError}
+            onRetry={() =>
+              startSharePreparation(activeSharePreparationIdentity)
+            }
+            onClose={closeSharePopover}
+          />
+        </>
       ) : null}
     </Popover>
+  );
+}
+
+function SharePreparationStarter({
+  identity,
+  onStart,
+}: {
+  identity: SharePreparationIdentity;
+  onStart: (identity: SharePreparationIdentity) => void;
+}) {
+  const startedRef = useRef(false);
+  useMountEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    onStart(identity);
+  });
+  return null;
+}
+
+function SessionSharePreparationContent({
+  loading,
+  error,
+  onRetry,
+  onClose,
+}: {
+  loading: boolean;
+  error: boolean;
+  onRetry: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <PopoverContent
+      variant="app"
+      align="end"
+      sideOffset={8}
+      aria-labelledby="session-share-heading"
+      aria-describedby="session-share-description"
+      className="w-[min(500px,calc(100vw-16px))] overflow-hidden"
+      onEscapeKeyDown={(event) => {
+        if (loading) event.preventDefault();
+      }}
+      onInteractOutside={(event) => {
+        if (loading) event.preventDefault();
+      }}
+    >
+      <AppFloatingPanel className="flex max-h-[calc(100vh-64px)] flex-col overflow-hidden">
+        <header className="border-border/60 border-b px-5 py-4 text-left">
+          <div className="flex items-center gap-3">
+            <div className="bg-accent flex size-9 items-center justify-center rounded-full">
+              <UsersIcon className="size-4" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <h2
+                id="session-share-heading"
+                className="text-sm leading-5 font-semibold tracking-normal"
+              >
+                <Trans>Share note</Trans>
+              </h2>
+              <p
+                id="session-share-description"
+                className="text-muted-foreground mt-0.5 text-xs leading-4"
+              >
+                <Trans>Choose who can open this note.</Trans>
+              </p>
+            </div>
+          </div>
+        </header>
+
+        <div className="flex min-h-52 items-center justify-center px-5 py-4">
+          {error && !loading ? (
+            <div className="flex flex-col items-center gap-3 text-center">
+              <p className="text-muted-foreground text-xs">
+                <Trans>Access settings could not be loaded.</Trans>
+              </p>
+              <Button size="sm" variant="outline" onClick={onRetry}>
+                <RefreshCwIcon className="size-3.5" aria-hidden="true" />
+                <Trans>Try again</Trans>
+              </Button>
+            </div>
+          ) : (
+            <div className="text-muted-foreground flex items-center gap-2 text-xs">
+              <Loader2Icon className="size-4 animate-spin" aria-hidden="true" />
+              <Trans>Loading access…</Trans>
+            </div>
+          )}
+        </div>
+
+        <footer className="border-border/60 flex justify-end border-t px-5 py-3">
+          <Button type="button" size="sm" onClick={onClose} disabled={loading}>
+            <CheckIcon className="size-3.5" aria-hidden="true" />
+            <Trans>Done</Trans>
+          </Button>
+        </footer>
+      </AppFloatingPanel>
+    </PopoverContent>
   );
 }
 
