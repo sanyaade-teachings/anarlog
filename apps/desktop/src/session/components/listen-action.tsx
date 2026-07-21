@@ -13,6 +13,10 @@ import {
 import { useTabs } from "~/store/zustand/tabs";
 import { useListener } from "~/stt/contexts";
 import { useStartListening } from "~/stt/useStartListening";
+import {
+  isMainWebviewWindow,
+  requestMainListenerControl,
+} from "~/stt/window-control";
 
 export function ListenActionButton({ sessionId }: { sessionId: string }) {
   const { shouldRender, isDisabled, warningMessage } =
@@ -22,7 +26,7 @@ export function ListenActionButton({ sessionId }: { sessionId: string }) {
   );
 
   if (loading) {
-    return <StopListeningButton />;
+    return <StopListeningButton sessionId={sessionId} />;
   }
 
   if (!shouldRender) {
@@ -38,11 +42,22 @@ export function ListenActionButton({ sessionId }: { sessionId: string }) {
   );
 }
 
-function StopListeningButton() {
+function StopListeningButton({ sessionId }: { sessionId: string }) {
   const stop = useListener((state) => state.stop);
 
+  const handleStop = useCallback(() => {
+    // Starts are proxied to the main window, so stops must be too — a local
+    // stop cannot end a session the main window owns.
+    if (!isMainWebviewWindow()) {
+      void requestMainListenerControl("stop", sessionId);
+      return;
+    }
+
+    stop();
+  }, [sessionId, stop]);
+
   return (
-    <FloatingButton onClick={stop}>
+    <FloatingButton onClick={handleStop}>
       <Spinner />
     </FloatingButton>
   );
@@ -61,10 +76,19 @@ function StartListeningButton({
   const openNew = useTabs((state) => state.openNew);
   const noteHasContent = useCurrentNoteHasContent(sessionId, { type: "raw" });
 
+  const handleStart = useCallback(() => {
+    if (!isMainWebviewWindow()) {
+      void requestMainListenerControl("start", sessionId);
+      return;
+    }
+
+    void startListening();
+  }, [sessionId, startListening]);
+
   const handleConfigure = useCallback(() => {
-    startListening();
+    handleStart();
     openNew({ type: "settings", state: { tab: "transcription" } });
-  }, [startListening, openNew]);
+  }, [handleStart, openNew]);
 
   return (
     <div>
@@ -76,7 +100,7 @@ function StartListeningButton({
         onConfigure={handleConfigure}
       >
         <FloatingButton
-          onClick={startListening}
+          onClick={handleStart}
           disabled={isDisabled}
           className="w-[148px] justify-start gap-2 pr-7 pl-3"
           tooltip={
