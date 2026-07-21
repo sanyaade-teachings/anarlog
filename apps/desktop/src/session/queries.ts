@@ -7,6 +7,7 @@ import type { EventParticipant, SessionEvent } from "@hypr/store";
 
 import { executeTransaction, liveQueryClient, useLiveQuery } from "~/db";
 import { enqueueDatabaseWrite } from "~/db/write-queue";
+import { waitForPendingSoftDelete } from "~/session/pending-soft-deletes";
 import { DEFAULT_USER_ID, id } from "~/shared/utils";
 import type { DeletedSessionData } from "~/store/zustand/undo-delete";
 
@@ -825,6 +826,7 @@ export async function getOrCreateSessionForEventId(
 
 export async function softDeleteSession(
   sessionId: string,
+  tombstone = new Date().toISOString(),
 ): Promise<DeletedSessionData | null> {
   const [session] = await liveQueryClient.execute<SessionDeleteSqlRow>(
     `SELECT id, title FROM sessions WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
@@ -832,7 +834,6 @@ export async function softDeleteSession(
   );
   if (!session) return null;
 
-  const tombstone = new Date().toISOString();
   const rowsAffected = await executeTransaction(
     buildSessionTombstoneStatements(sessionId, tombstone),
   );
@@ -912,9 +913,26 @@ export async function isSessionEmpty(sessionId: string): Promise<boolean> {
 export async function restoreDeletedSession(
   data: DeletedSessionData,
 ): Promise<void> {
-  await executeTransaction(
-    buildSessionTombstoneStatements(data.session.id, data.tombstone, true),
-  );
+  // The undo toast shows before the soft-delete write commits. Wait for the
+  // in-flight delete to settle first — an "alive" session during that window
+  // is not restored, it just isn't tombstoned yet.
+  await waitForPendingSoftDelete(data.session.id);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const rowsAffected = await executeTransaction(
+      buildSessionTombstoneStatements(data.session.id, data.tombstone, true),
+    );
+    if (rowsAffected[rowsAffected.length - 1] === 1) return;
+
+    const [alive] = await liveQueryClient.execute<SessionIdentitySqlRow>(
+      `SELECT id FROM sessions WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+      [data.session.id],
+    );
+    if (alive) return;
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error(`Session ${data.session.id} was never soft-deleted`);
 }
 
 export async function finalizeSessionDeletion(
